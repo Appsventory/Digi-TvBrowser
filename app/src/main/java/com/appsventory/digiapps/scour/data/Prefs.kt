@@ -1,0 +1,338 @@
+package com.appsventory.digiapps.scour.data
+
+import android.content.Context
+import org.json.JSONArray
+import org.json.JSONObject
+
+enum class SearchEngine(val id: String, val label: String, val queryUrl: String) {
+    Google("google", "Google", "https://www.google.com/search?q="),
+    Bing("bing", "Bing", "https://www.bing.com/search?q="),
+    Yahoo("yahoo", "Yahoo", "https://search.yahoo.com/search?p="),
+    DuckDuckGo("duckduckgo", "DuckDuckGo", "https://duckduckgo.com/?q=");
+
+    companion object {
+        fun fromId(id: String): SearchEngine =
+            entries.find { it.id == id } ?: Google
+    }
+}
+
+data class BookmarkEntry(
+    val title: String,
+    val url: String,
+    val colorHex: Long = BrowserConfig.DEFAULT_SHORTCUT_COLOR
+)
+
+data class ShortcutEntry(
+    val title: String,
+    val url: String,
+    val colorHex: Long = BrowserConfig.DEFAULT_SHORTCUT_COLOR,
+    val iconEmoji: String = ""
+)
+
+/** Persisted browsing history row. */
+data class HistoryEntry(
+    val title: String,
+    val url: String,
+    val timeLabel: String
+)
+
+/** Persisted download row. */
+data class DownloadEntry(
+    val id: Long = 0L,
+    val name: String,
+    val sizeLabel: String,
+    val status: String,
+    val progress: Float = 1f
+)
+
+object Prefs {
+    private const val NAME = "digi_browser_prefs"
+    private const val KEY_ENGINE = "search_engine"
+    private const val KEY_DESKTOP = "desktop_mode"
+    private const val KEY_BOOKMARKS = "bookmarks_json"
+    private const val KEY_SHORTCUTS = "shortcuts_json"
+    private const val KEY_HISTORY = "history_json"
+    private const val KEY_DOWNLOADS = "downloads_json"
+    private const val KEY_SESSION_URL = "session_url"
+    private const val KEY_TABS = "tabs_json"
+    private const val KEY_ACTIVE_TAB = "active_tab_id"
+    private const val KEY_ADBLOCK = "adblock_enabled"
+    private const val KEY_JS = "javascript_enabled"
+    private const val KEY_BLOCK_POPUPS = "block_popups"
+    private const val KEY_SAVE_HISTORY = "save_history"
+    private const val MAX_HISTORY = 200
+    private const val MAX_DOWNLOADS = 100
+
+    private fun prefs(context: Context) =
+        context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
+
+    fun getSearchEngine(context: Context): SearchEngine {
+        val id = prefs(context).getString(KEY_ENGINE, SearchEngine.Google.id)
+            ?: SearchEngine.Google.id
+        return SearchEngine.fromId(id)
+    }
+
+    fun setSearchEngine(context: Context, engine: SearchEngine) {
+        prefs(context).edit().putString(KEY_ENGINE, engine.id).apply()
+    }
+
+    fun isDesktopMode(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_DESKTOP, false)
+
+    fun setDesktopMode(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_DESKTOP, enabled).apply()
+    }
+
+    // —— Bookmarks ——
+    fun getBookmarks(context: Context): List<BookmarkEntry> {
+        val raw = prefs(context).getString(KEY_BOOKMARKS, null) ?: return emptyList()
+        return runCatching {
+            val arr = JSONArray(raw)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    add(
+                        BookmarkEntry(
+                            title = o.getString("title"),
+                            url = o.getString("url"),
+                            colorHex = o.optLong("color", BrowserConfig.DEFAULT_SHORTCUT_COLOR)
+                        )
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun setBookmarks(context: Context, items: List<BookmarkEntry>) {
+        val arr = JSONArray()
+        items.forEach { b ->
+            arr.put(
+                JSONObject()
+                    .put("title", b.title)
+                    .put("url", b.url)
+                    .put("color", b.colorHex)
+            )
+        }
+        prefs(context).edit().putString(KEY_BOOKMARKS, arr.toString()).apply()
+    }
+
+    fun addBookmark(context: Context, entry: BookmarkEntry): Boolean {
+        val current = getBookmarks(context)
+        if (current.any { it.url == entry.url }) return false
+        setBookmarks(context, listOf(entry) + current)
+        return true
+    }
+
+    fun isBookmarked(context: Context, url: String): Boolean =
+        getBookmarks(context).any { it.url == url }
+
+    fun removeBookmark(context: Context, url: String): Boolean {
+        val current = getBookmarks(context)
+        val next = current.filterNot { it.url == url }
+        if (next.size == current.size) return false
+        setBookmarks(context, next)
+        return true
+    }
+
+    /** Add if missing, remove if present. Returns true if now bookmarked. */
+    fun toggleBookmark(context: Context, entry: BookmarkEntry): Boolean {
+        return if (isBookmarked(context, entry.url)) {
+            removeBookmark(context, entry.url)
+            false
+        } else {
+            addBookmark(context, entry)
+            true
+        }
+    }
+
+    // —— Shortcuts ——
+    fun getShortcuts(context: Context): List<ShortcutEntry> {
+        val raw = prefs(context).getString(KEY_SHORTCUTS, null)
+        if (raw.isNullOrBlank()) {
+            val seed = defaultQuickLinks.map {
+                ShortcutEntry(it.title, it.url, it.colorHex)
+            }
+            setShortcuts(context, seed)
+            return seed
+        }
+        return runCatching {
+            val arr = JSONArray(raw)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    add(
+                        ShortcutEntry(
+                            title = o.getString("title"),
+                            url = o.getString("url"),
+                            colorHex = o.optLong("color", BrowserConfig.DEFAULT_SHORTCUT_COLOR),
+                            iconEmoji = o.optString("icon", "")
+                        )
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun setShortcuts(context: Context, items: List<ShortcutEntry>) {
+        val arr = JSONArray()
+        items.forEach { s ->
+            arr.put(
+                JSONObject()
+                    .put("title", s.title)
+                    .put("url", s.url)
+                    .put("color", s.colorHex)
+                    .put("icon", s.iconEmoji)
+            )
+        }
+        prefs(context).edit().putString(KEY_SHORTCUTS, arr.toString()).apply()
+    }
+
+    // —— History (persist across process death) ——
+    fun getHistory(context: Context): List<HistoryEntry> {
+        val raw = prefs(context).getString(KEY_HISTORY, null) ?: return emptyList()
+        return runCatching {
+            val arr = JSONArray(raw)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    add(
+                        HistoryEntry(
+                            title = o.getString("title"),
+                            url = o.getString("url"),
+                            timeLabel = o.optString("time", "")
+                        )
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun setHistory(context: Context, items: List<HistoryEntry>) {
+        val trimmed = items.take(MAX_HISTORY)
+        val arr = JSONArray()
+        trimmed.forEach { h ->
+            arr.put(
+                JSONObject()
+                    .put("title", h.title)
+                    .put("url", h.url)
+                    .put("time", h.timeLabel)
+            )
+        }
+        prefs(context).edit().putString(KEY_HISTORY, arr.toString()).apply()
+    }
+
+    // —— Downloads ——
+    fun getDownloads(context: Context): List<DownloadEntry> {
+        val raw = prefs(context).getString(KEY_DOWNLOADS, null) ?: return emptyList()
+        return runCatching {
+            val arr = JSONArray(raw)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    add(
+                        DownloadEntry(
+                            id = o.optLong("id", 0L),
+                            name = o.getString("name"),
+                            sizeLabel = o.optString("size", "—"),
+                            status = o.optString("status", DownloadStatus.COMPLETED),
+                            progress = o.optDouble("progress", 1.0).toFloat()
+                        )
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun setDownloads(context: Context, items: List<DownloadEntry>) {
+        val trimmed = items.take(MAX_DOWNLOADS)
+        val arr = JSONArray()
+        trimmed.forEach { d ->
+            arr.put(
+                JSONObject()
+                    .put("id", d.id)
+                    .put("name", d.name)
+                    .put("size", d.sizeLabel)
+                    .put("status", d.status)
+                    .put("progress", d.progress.toDouble())
+            )
+        }
+        prefs(context).edit().putString(KEY_DOWNLOADS, arr.toString()).apply()
+    }
+    // —— Tabs (saved so they survive app exit / new WebView) ——
+    fun getTabs(context: Context): List<BrowserTab> {
+        val raw = prefs(context).getString(KEY_TABS, null) ?: return emptyList()
+        return runCatching {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.getJSONObject(i)
+                val url = o.optString("url")
+                if (url.isBlank()) null
+                else BrowserTab(o.getLong("id"), url, o.optString("title"))
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun getActiveTabId(context: Context): Long =
+        prefs(context).getLong(KEY_ACTIVE_TAB, -1L)
+
+    fun setTabs(context: Context, tabs: List<BrowserTab>, activeId: Long) {
+        val arr = JSONArray()
+        tabs.forEach {
+            arr.put(JSONObject().put("id", it.id).put("url", it.url).put("title", it.title))
+        }
+        prefs(context).edit()
+            .putString(KEY_TABS, arr.toString())
+            .putLong(KEY_ACTIVE_TAB, activeId)
+            .apply()
+    }
+
+    // —— Session (last open page) ——
+    fun getSessionUrl(context: Context): String? =
+        prefs(context).getString(KEY_SESSION_URL, null)?.takeIf { it.isNotBlank() }
+
+    fun setSessionUrl(context: Context, url: String?) {
+        prefs(context).edit().apply {
+            if (url.isNullOrBlank() || url.startsWith("about:")) remove(KEY_SESSION_URL)
+            else putString(KEY_SESSION_URL, url)
+        }.apply()
+    }
+
+    fun isAdBlockEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_ADBLOCK, true)
+
+    fun setAdBlockEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_ADBLOCK, enabled).apply()
+    }
+
+    fun isJsEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_JS, true)
+
+    fun setJsEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_JS, enabled).apply()
+    }
+
+    fun isBlockPopups(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_BLOCK_POPUPS, true)
+
+    fun setBlockPopups(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_BLOCK_POPUPS, enabled).apply()
+    }
+
+    fun isSaveHistory(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_SAVE_HISTORY, true)
+
+    fun setSaveHistory(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_SAVE_HISTORY, enabled).apply()
+    }
+}
+
+
+object UserAgents {
+    const val MOBILE =
+        "Mozilla/5.0 (Linux; Android 13; TV) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+    const val DESKTOP =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
