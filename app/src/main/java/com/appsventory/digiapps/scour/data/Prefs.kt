@@ -16,6 +16,24 @@ enum class SearchEngine(val id: String, val label: String, val queryUrl: String)
     }
 }
 
+enum class PrivateDnsProvider(
+    val id: String,
+    val label: String,
+    val host: String,
+    val description: String
+) {
+    Off("off", "Off (System Default)", "", "Uses default system network DNS"),
+    AdGuard("adguard", "AdGuard DNS", "dns.adguard-dns.com", "Blocks ads, malicious domains & trackers"),
+    Cloudflare("cloudflare", "Cloudflare (1.1.1.1)", "one.one.one.one", "Fast, privacy-focused public DNS"),
+    Google("google", "Google DNS (8.8.8.8)", "dns.google", "High performance global DNS"),
+    Quad9("quad9", "Quad9 DNS", "dns.quad9.net", "Blocks malware & phishing domains");
+
+    companion object {
+        fun fromId(id: String): PrivateDnsProvider =
+            entries.find { it.id == id } ?: Off
+    }
+}
+
 data class BookmarkEntry(
     val title: String,
     val url: String,
@@ -57,11 +75,15 @@ object Prefs {
     private const val KEY_TABS = "tabs_json"
     private const val KEY_ACTIVE_TAB = "active_tab_id"
     private const val KEY_ADBLOCK = "adblock_enabled"
+    private const val KEY_STRONG_ADBLOCK = "strong_adblock_enabled"
     private const val KEY_JS = "javascript_enabled"
     private const val KEY_BLOCK_POPUPS = "block_popups"
     private const val KEY_SAVE_HISTORY = "save_history"
+    private const val KEY_PRIVATE_DNS = "private_dns"
+    private const val KEY_VIDEO_RESUME = "video_resume_json"
     private const val MAX_HISTORY = 200
     private const val MAX_DOWNLOADS = 100
+    private const val MAX_VIDEO_RESUME = 100
 
     private fun prefs(context: Context) =
         context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -286,6 +308,42 @@ object Prefs {
             .apply()
     }
 
+    // —— Video resume positions (newest first, capped) ——
+    private fun readResume(context: Context): MutableList<Pair<String, Long>> {
+        val raw = prefs(context).getString(KEY_VIDEO_RESUME, null) ?: return mutableListOf()
+        return runCatching {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.getJSONObject(i)
+                val key = o.optString("k")
+                if (key.isBlank()) null else key to o.optLong("p")
+            }.toMutableList()
+        }.getOrDefault(mutableListOf())
+    }
+
+    private fun writeResume(context: Context, items: List<Pair<String, Long>>) {
+        val arr = JSONArray()
+        items.take(MAX_VIDEO_RESUME).forEach { (k, p) ->
+            arr.put(JSONObject().put("k", k).put("p", p))
+        }
+        prefs(context).edit().putString(KEY_VIDEO_RESUME, arr.toString()).apply()
+    }
+
+    fun getResumePosition(context: Context, key: String): Long =
+        readResume(context).firstOrNull { it.first == key }?.second ?: 0L
+
+    fun setResumePosition(context: Context, key: String, positionMs: Long) {
+        val items = readResume(context)
+        items.removeAll { it.first == key }
+        items.add(0, key to positionMs)
+        writeResume(context, items)
+    }
+
+    fun clearResumePosition(context: Context, key: String) {
+        val items = readResume(context)
+        if (items.removeAll { it.first == key }) writeResume(context, items)
+    }
+
     // —— Session (last open page) ——
     fun getSessionUrl(context: Context): String? =
         prefs(context).getString(KEY_SESSION_URL, null)?.takeIf { it.isNotBlank() }
@@ -302,6 +360,13 @@ object Prefs {
 
     fun setAdBlockEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_ADBLOCK, enabled).apply()
+    }
+
+    fun isStrongAdBlock(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_STRONG_ADBLOCK, true)
+
+    fun setStrongAdBlock(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_STRONG_ADBLOCK, enabled).apply()
     }
 
     fun isJsEnabled(context: Context): Boolean =
@@ -323,6 +388,16 @@ object Prefs {
 
     fun setSaveHistory(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(KEY_SAVE_HISTORY, enabled).apply()
+    }
+
+    fun getPrivateDns(context: Context): PrivateDnsProvider {
+        val id = prefs(context).getString(KEY_PRIVATE_DNS, PrivateDnsProvider.Off.id)
+            ?: PrivateDnsProvider.Off.id
+        return PrivateDnsProvider.fromId(id)
+    }
+
+    fun setPrivateDns(context: Context, provider: PrivateDnsProvider) {
+        prefs(context).edit().putString(KEY_PRIVATE_DNS, provider.id).apply()
     }
 }
 

@@ -15,6 +15,8 @@ import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.net.http.SslError
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.view.InputDevice
 import android.view.MotionEvent
@@ -23,6 +25,7 @@ import android.os.Bundle
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.webkit.SslErrorHandler
+import android.view.View
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -77,6 +80,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.PlayCircle
 import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Shield
@@ -93,6 +97,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -133,15 +138,28 @@ import com.appsventory.digiapps.scour.data.BrowserTab
 import com.appsventory.digiapps.scour.data.hostOf
 import com.appsventory.digiapps.scour.data.isRealUrl
 import com.appsventory.digiapps.scour.data.Prefs
+import com.appsventory.digiapps.scour.data.PrivateDnsProvider
 import com.appsventory.digiapps.scour.data.TabThumbs
 import com.appsventory.digiapps.scour.data.SearchEngine
 import com.appsventory.digiapps.scour.data.UserAgents
+import com.appsventory.digiapps.scour.player.DetectedStream
+import com.appsventory.digiapps.scour.player.DetectedSubtitle
+import com.appsventory.digiapps.scour.player.ManifestProbe
+import com.appsventory.digiapps.scour.player.MediaHit
+import com.appsventory.digiapps.scour.player.MediaStreamDetector
+import com.appsventory.digiapps.scour.player.PlayerConfig
+import com.appsventory.digiapps.scour.player.PlayerRequest
+import com.appsventory.digiapps.scour.player.StreamType
+import com.appsventory.digiapps.scour.player.StreamRanking
+import com.appsventory.digiapps.scour.player.VideoBridge
+import com.appsventory.digiapps.scour.ui.player.VideoPlayerScreen
 import com.appsventory.digiapps.scour.ui.theme.DigiColors
 import com.appsventory.digiapps.scour.ui.home.normalizeInput
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.ui.res.stringResource
 import com.appsventory.digiapps.scour.R
 
@@ -166,6 +184,7 @@ fun BrowserScreen(
     onHistoryVisit: (title: String, url: String) -> Unit = { _, _ -> },
     onDownload: (id: Long, name: String, sizeLabel: String) -> Unit = { _, _, _ -> },
     searchEngine: SearchEngine = SearchEngine.Google,
+    privateDns: PrivateDnsProvider = PrivateDnsProvider.Off,
     modifier: Modifier = Modifier
 ) {
     val webFocusRequester = remember { FocusRequester() }
@@ -190,7 +209,7 @@ fun BrowserScreen(
                     BrowserTab(
                         id = 1L,
                         url = initialUrl,
-                        title = hostOf(initialUrl, context.getString(R.string.tab_default_title))
+                        title = hostOf(initialUrl, "Tab")
                     )
                 )
             }
@@ -209,10 +228,25 @@ fun BrowserScreen(
     var toastMsg by remember { mutableStateOf<String?>(null) }
     var downloadBanner by remember { mutableStateOf<String?>(null) }
 
+    // ---- Native video player: streams seen on the current page (reactive) ----
+    var detectedStreams by remember { mutableStateOf<List<DetectedStream>>(emptyList()) }
+    var detectedSubtitles by remember { mutableStateOf<List<DetectedSubtitle>>(emptyList()) }
+    var streamPromptDismissed by remember { mutableStateOf(false) }
+    /** User pressed the Video panel button: show the prompt even if every stream looks like an ad. */
+    var streamPromptForced by remember { mutableStateOf(false) }
+    /** Duration of the long <video> the page is really playing (JS bridge), 0 = none seen yet. */
+    var playingDurationMs by remember { mutableLongStateOf(0L) }
+    val scope = rememberCoroutineScope()
+    // Page-requested fullscreen (in-page players, DRM sites): the WebView hands us a View to show.
+    var customView by remember { mutableStateOf<View?>(null) }
+    var customViewCallback by remember { mutableStateOf<WebChromeClient.CustomViewCallback?>(null) }
+    var playerRequest by remember { mutableStateOf<PlayerRequest?>(null) }
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+
     var urlText by remember { mutableStateOf(initialUrl) }
     var pageTitle by remember {
         mutableStateOf(
-            tabs.firstOrNull { it.id == activeTabId }?.title?.ifBlank { null } ?: context.getString(R.string.app_name)
+            tabs.firstOrNull { it.id == activeTabId }?.title?.ifBlank { null } ?: "Digi Browser"
         )
     }
 
@@ -413,13 +447,13 @@ fun BrowserScreen(
 
     fun addTab() {
         if (tabs.size >= BrowserConfig.MAX_TABS) {
-            toastMsg = context.getString(R.string.msg_tab_limit, BrowserConfig.MAX_TABS)
+            toastMsg = "Tab limit reached (${BrowserConfig.MAX_TABS})"
             return
         }
         persistActiveTab(currentPageUrl(), pageTitle)
         val id = System.currentTimeMillis()
         val start = BrowserConfig.HOME_URL
-        tabs = tabs + BrowserTab(id, start, context.getString(R.string.tab_new))
+        tabs = tabs + BrowserTab(id, start, "New tab")
         activeTabId = id
         urlText = start
         pageTitle = context.getString(R.string.tab_new)
@@ -585,7 +619,7 @@ fun BrowserScreen(
             lastNanos = now
             val heldFor = (SystemClock.uptimeMillis() - holdStartMs) / 1000f
             val accel = (heldFor / 0.4f).coerceIn(0f, 1f)
-            val speed = 320f + 580f * accel
+            val speed = 120f + 240f * accel
             val len = sqrt(dirX * dirX + dirY * dirY).coerceAtLeast(0.001f)
             applyMove((dirX / len) * speed * dt, (dirY / len) * speed * dt)
         }
@@ -610,11 +644,20 @@ fun BrowserScreen(
         }
     }
 
-    BackHandler(enabled = true) {
+    val rankedStreams = remember(detectedStreams, playingDurationMs) {
+        StreamRanking.rank(detectedStreams, playingDurationMs)
+    }
+    val streamPromptVisible = rankedStreams.isNotEmpty() && !streamPromptDismissed &&
+        (streamPromptForced || rankedStreams.any { StreamRanking.isEligible(it) }) &&
+        !chromeVisible && !tabsExpanded && playerRequest == null
+
+    // The player screen has its own BackHandler; this one stays out of its way.
+    BackHandler(enabled = playerRequest == null) {
         when {
             tabsExpanded -> {
                 tabsExpanded = false
             }
+            streamPromptVisible -> streamPromptDismissed = true
             urlEditing -> {
                 urlEditing = false
                 keyboard?.hide()
@@ -630,6 +673,85 @@ fun BrowserScreen(
         }
     }
 
+
+    // ---- Stream detection (called from WebView's IO thread → state is updated on main) ----
+    fun resetDetection() {
+        detectedStreams = emptyList()
+        detectedSubtitles = emptyList()
+        streamPromptDismissed = false
+        streamPromptForced = false
+        playingDurationMs = 0L
+    }
+
+    fun strongAdBlockNow(ctx: Context): Boolean =
+        (Prefs.isAdBlockEnabled(ctx) || privateDns == PrivateDnsProvider.AdGuard) &&
+            Prefs.isStrongAdBlock(ctx)
+
+    /** Main thread. [requestHeaders] = what the WebView sent (empty when the URL came from the DOM). */
+    fun addDetected(hit: MediaHit, requestHeaders: Map<String, String>) {
+        when (hit) {
+            is MediaHit.Stream -> {
+                if (detectedStreams.size >= PlayerConfig.MAX_STREAM_CANDIDATES ||
+                    detectedStreams.any { it.url == hit.url }
+                ) return
+                if (strongAdBlockNow(context) && AdBlock.looksLikeAdStream(hit.url)) return
+                val page = urlText.takeIf { it.isRealUrl() }
+                val stream = DetectedStream(
+                    url = hit.url,
+                    type = hit.type,
+                    title = pageTitle.ifBlank { hostOf(hit.url) },
+                    userAgent = MediaStreamDetector.userAgentOf(requestHeaders)
+                        ?: webView?.settings?.userAgentString,
+                    headers = MediaStreamDetector.forwardedHeaders(requestHeaders, page),
+                    probed = hit.type == StreamType.PROGRESSIVE
+                )
+                detectedStreams = detectedStreams + stream
+                if (!stream.probed) {
+                    // Read duration / height from the manifest so ads can be told from the film.
+                    scope.launch {
+                        val info = ManifestProbe.probe(stream)
+                        detectedStreams = detectedStreams.map {
+                            if (it.url == stream.url) it.copy(info = info, probed = true) else it
+                        }
+                    }
+                }
+            }
+            is MediaHit.Subtitle -> {
+                if (detectedSubtitles.size >= PlayerConfig.MAX_SUBTITLE_CANDIDATES ||
+                    detectedSubtitles.any { it.url == hit.url }
+                ) return
+                detectedSubtitles = detectedSubtitles + DetectedSubtitle(hit.url, hit.format, hit.language)
+            }
+        }
+    }
+
+    fun handleMediaRequest(request: WebResourceRequest) {
+        if (request.method != "GET") return
+        val hit = MediaStreamDetector.classify(request.url) ?: return
+        val requestHeaders = request.requestHeaders ?: emptyMap()
+        mainHandler.post { addDetected(hit, requestHeaders) }
+    }
+
+    fun openPlayer(stream: DetectedStream) {
+        streamPromptDismissed = true
+        streamPromptForced = false
+        // Silence the page so it does not play under the native player.
+        webView?.evaluateJavascript(PlayerConfig.PAUSE_WEB_MEDIA_JS, null)
+        playerRequest = PlayerRequest(stream, detectedSubtitles, rankedStreams)
+    }
+
+    fun closePlayer() {
+        playerRequest = null
+        if (isTv) runCatching { webFocusRequester.requestFocus() }
+    }
+
+    // New tab in front → detections of the old page no longer apply
+    LaunchedEffect(activeTabId) {
+        resetDetection()
+        customViewCallback?.onCustomViewHidden()
+        customView = null
+        customViewCallback = null
+    }
 
     fun createWebView(ctx: Context, tab: BrowserTab): WebView =
         WebView(ctx).apply {
@@ -665,6 +787,31 @@ fun BrowserScreen(
             }
             // Scale so desktop layout fits screen width
             setInitialScale(1)
+            if (Prefs.isJsEnabled(ctx)) {
+                // Page tells us which <video> is really playing → picks the film over ads.
+                addJavascriptInterface(
+                    VideoBridge(
+                        onLongVideoPlaying = { ms ->
+                            mainHandler.post { if (tab.id == activeTabId) playingDurationMs = ms }
+                        },
+                        onMediaUrl = { url ->
+                            mainHandler.post {
+                                if (tab.id == activeTabId) {
+                                    MediaStreamDetector.classifyMediaElement(url)?.let { addDetected(it, emptyMap()) }
+                                }
+                            }
+                        },
+                        onTrackUrl = { url, lang ->
+                            mainHandler.post {
+                                if (tab.id == activeTabId) {
+                                    MediaStreamDetector.classifyTrack(url, lang)?.let { addDetected(it, emptyMap()) }
+                                }
+                            }
+                        }
+                    ),
+                    PlayerConfig.VIDEO_BRIDGE_NAME
+                )
+            }
             setDownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
                 val fileName = android.webkit.URLUtil.guessFileName(
                     url, contentDisposition, mimeType
@@ -732,17 +879,21 @@ fun BrowserScreen(
                     request: WebResourceRequest?
                 ): WebResourceResponse? {
                     val u = request?.url?.toString()
-                    if (Prefs.isAdBlockEnabled(ctx) && AdBlock.shouldBlock(u)) {
+                    if ((Prefs.isAdBlockEnabled(ctx) || privateDns == PrivateDnsProvider.AdGuard) &&
+                        AdBlock.shouldBlock(u, pageUrl = urlText, strong = Prefs.isStrongAdBlock(ctx))
+                    ) {
                         return WebResourceResponse(
                             "text/plain",
                             "utf-8",
                             java.io.ByteArrayInputStream(ByteArray(0))
                         )
                     }
+                    if (active() && request != null) handleMediaRequest(request)
                     return super.shouldInterceptRequest(v, request)
                 }
                 override fun onPageStarted(v: WebView?, url: String?, f: Bitmap?) {
                     if (!active()) return
+                    resetDetection()
                     loadStarted = true
                     isLoading = true
                     loadError = null
@@ -750,6 +901,10 @@ fun BrowserScreen(
                     syncNav(v)
                 }
                 override fun onPageFinished(v: WebView, url: String) {
+                    if (Prefs.isJsEnabled(ctx)) {
+                        v.evaluateJavascript(PlayerConfig.VIDEO_HOOK_JS, null)
+                        if (strongAdBlockNow(ctx)) v.evaluateJavascript(AdBlock.COSMETIC_JS, null)
+                    }
                     if (!active()) { syncUrl(v, url); return }
                     isLoading = false
                     loadError = null
@@ -785,6 +940,19 @@ fun BrowserScreen(
                 }
             }
             webChromeClient = object : WebChromeClient() {
+                override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                    if (view == null) {
+                        callback?.onCustomViewHidden()
+                        return
+                    }
+                    customViewCallback?.onCustomViewHidden()
+                    customView = view
+                    customViewCallback = callback
+                }
+                override fun onHideCustomView() {
+                    customView = null
+                    customViewCallback = null
+                }
                 override fun onProgressChanged(v: WebView?, p: Int) {
                     if (!active()) return
                     if (p > 0) loadStarted = true
@@ -907,6 +1075,7 @@ fun BrowserScreen(
         }
     }
 
+    Box(Modifier.fillMaxSize()) {
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -941,7 +1110,7 @@ fun BrowserScreen(
                     if (!isTv) return@onPreviewKeyEvent false
                     val down = event.type == KeyEventType.KeyDown
                     val up = event.type == KeyEventType.KeyUp
-                    val step = 36f
+                    val step = 10f
 
                     if (down && (event.key == Key.Menu || event.key == Key.Guide || event.key == Key.Info)) {
                         if (chromeVisible) hideChrome() else showChrome()
@@ -1106,6 +1275,19 @@ fun BrowserScreen(
 
         }
 
+        // ===== "Video detected" prompt =====
+        if (streamPromptVisible) {
+            StreamPrompt(
+                streams = rankedStreams,
+                onPlayInApp = { openPlayer(it) },
+                onPlayInBrowser = {
+                    streamPromptDismissed = true
+                    if (isTv) runCatching { webFocusRequester.requestFocus() }
+                },
+                modifier = Modifier.align(Alignment.BottomCenter)
+            )
+        }
+
         // ===== Bottom panel — overlay on top of WebView, solid background =====
         if (chromeVisible) {
             Column(
@@ -1249,6 +1431,12 @@ fun BrowserScreen(
                             Icons.Outlined.History, stringResource(R.string.nav_history),
                             onClick = { hideChrome(); onOpenHistory(liveUrl()) }
                         )
+                        if (detectedStreams.isNotEmpty()) {
+                            PanelButton(
+                                Icons.Outlined.PlayCircle, stringResource(R.string.panel_video),
+                                onClick = { hideChrome(); streamPromptDismissed = false; streamPromptForced = true }
+                            )
+                        }
                         PanelButton(
                             Icons.Outlined.Settings, stringResource(R.string.nav_settings),
                             onClick = { hideChrome(); onOpenSettings(liveUrl()) }
@@ -1365,6 +1553,12 @@ fun BrowserScreen(
                             active = desktopMode,
                             onClick = { toggleDesktop() }
                         )
+                        if (detectedStreams.isNotEmpty()) {
+                            PanelButton(
+                                Icons.Outlined.PlayCircle, stringResource(R.string.panel_video),
+                                onClick = { hideChrome(); streamPromptDismissed = false; streamPromptForced = true }
+                            )
+                        }
                         PanelButton(
                             Icons.Outlined.Settings, stringResource(R.string.nav_settings),
                             onClick = { hideChrome(); onOpenSettings(liveUrl()) }
@@ -1447,6 +1641,26 @@ fun BrowserScreen(
             )
         }
     } // Box
+
+    // ===== Page fullscreen (WebChromeClient custom view) =====
+    customView?.let { view ->
+        FullscreenWebVideo(
+            view = view,
+            callback = customViewCallback,
+            onExit = { customView = null; customViewCallback = null }
+        )
+    }
+
+    // ===== Native video player (full screen, ignores system-bar paddings) =====
+    playerRequest?.let { req ->
+        VideoPlayerScreen(
+            initialStream = req.stream,
+            subtitles = req.subtitles,
+            streams = req.streams,
+            onClose = { closePlayer() }
+        )
+    }
+    } // Box (browser + player)
 }
 
 @Composable

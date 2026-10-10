@@ -14,7 +14,7 @@ android {
         minSdk = 23
         targetSdk = 37
         versionCode = 1
-        versionName = "1.0"
+        versionName = "2.0.0"
 
     }
 
@@ -47,4 +47,10 @@ dependencies {
     implementation(libs.androidx.tv.material)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
+
+    // Native video player (Media3)
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.exoplayer.hls)
+    implementation(libs.androidx.media3.exoplayer.dash)
+    implementation(libs.androidx.media3.ui)
 }

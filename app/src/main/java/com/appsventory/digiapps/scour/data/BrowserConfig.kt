@@ -20,6 +20,14 @@ object BrowserConfig {
     const val LOAD_TIMEOUT_MS = 20_000L
     const val TOAST_MS = 1_800L
 
+    // App updates (GitHub releases)
+    const val GITHUB_REPO = "Appsventory/Digi-TvBrowser"
+    const val UPDATE_API_URL = "https://api.github.com/repos/$GITHUB_REPO/releases/latest"
+    const val UPDATE_RELEASES_URL = "https://github.com/$GITHUB_REPO/releases"
+    const val UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000L
+    const val UPDATE_TIMEOUT_MS = 10_000
+    const val UPDATE_PROGRESS_POLL_MS = 500L
+
     // Downloads
     const val DOWNLOAD_POLL_MS = 400L
     const val DOWNLOAD_BANNER_MS = 10_000L

@@ -9,13 +9,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Surface
+import com.appsventory.digiapps.scour.R
 import com.appsventory.digiapps.scour.data.BrowserConfig
 import com.appsventory.digiapps.scour.data.BrowserTab
 import com.appsventory.digiapps.scour.data.DownloadStatus
@@ -24,7 +27,13 @@ import com.appsventory.digiapps.scour.data.isRealUrl
 import com.appsventory.digiapps.scour.data.DownloadEntry
 import com.appsventory.digiapps.scour.data.HistoryEntry
 import com.appsventory.digiapps.scour.data.Prefs
+import com.appsventory.digiapps.scour.data.UpdateChecker
+import com.appsventory.digiapps.scour.data.UpdateStatus
+import com.appsventory.digiapps.scour.data.appVersionName
+import com.appsventory.digiapps.scour.data.release
+import com.appsventory.digiapps.scour.ui.update.UpdateOverflowMenu
 import com.appsventory.digiapps.scour.data.TabThumbs
+import com.appsventory.digiapps.scour.player.PlayerPip
 import com.appsventory.digiapps.scour.ui.bookmarks.BookmarksScreen
 import com.appsventory.digiapps.scour.ui.browser.BrowserScreen
 import com.appsventory.digiapps.scour.ui.browser.TabSwitcherOverlay
@@ -37,10 +46,13 @@ import com.appsventory.digiapps.scour.ui.settings.SettingsScreen
 import com.appsventory.digiapps.scour.ui.shell.AppScaffold
 import com.appsventory.digiapps.scour.ui.shell.AppTab
 import com.appsventory.digiapps.scour.ui.theme.DigiBrowserTheme
+import com.appsventory.digiapps.scour.ui.update.UpdateScreen
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import android.os.SystemClock
 
 class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalTvMaterial3Api::class)
@@ -53,6 +65,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /** Home pressed while the native player is playing → shrink into picture-in-picture. */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        PlayerPip.onUserLeaveHint?.invoke()
     }
 }
 
@@ -95,9 +113,11 @@ private fun DigiBrowserApp() {
     var searchEngine by remember { mutableStateOf(Prefs.getSearchEngine(context)) }
     var desktopMode by remember { mutableStateOf(Prefs.isDesktopMode(context)) }
     var adBlockEnabled by remember { mutableStateOf(Prefs.isAdBlockEnabled(context)) }
+    var strongAdBlock by remember { mutableStateOf(Prefs.isStrongAdBlock(context)) }
     var jsEnabled by remember { mutableStateOf(Prefs.isJsEnabled(context)) }
     var blockPopups by remember { mutableStateOf(Prefs.isBlockPopups(context)) }
     var saveHistoryEnabled by remember { mutableStateOf(Prefs.isSaveHistory(context)) }
+    var privateDns by remember { mutableStateOf(Prefs.getPrivateDns(context)) }
 
     fun persistHistory(list: List<HistoryItem>) {
         Prefs.setHistory(
@@ -224,6 +244,45 @@ private fun DigiBrowserApp() {
         }
     }
 
+    fun addDownload(id: Long, name: String, sizeLabel: String) {
+        val next = listOf(
+            DownloadItem(
+                id = id,
+                name = name,
+                sizeLabel = sizeLabel,
+                status = DownloadStatus.DOWNLOADING,
+                progress = 0.02f
+            )
+        ) + downloads.filterNot { it.id == id }
+        downloads = next
+        persistDownloads(next)
+    }
+
+    // ---- App updates (GitHub releases) ----
+    val currentVersion = remember { appVersionName(context) }
+    val scope = rememberCoroutineScope()
+    var updateStatus by remember { mutableStateOf<UpdateStatus>(UpdateStatus.Idle) }
+    var lastUpdateCheckMs by remember { mutableLongStateOf(0L) }
+    var showUpdate by remember { mutableStateOf(false) }
+    var updateDownloadId by remember { mutableLongStateOf(-1L) }
+
+    fun checkForUpdates(force: Boolean) {
+        if (updateStatus is UpdateStatus.Checking) return
+        val fresh = updateStatus is UpdateStatus.Available || updateStatus is UpdateStatus.UpToDate
+        val recent = SystemClock.elapsedRealtime() - lastUpdateCheckMs < BrowserConfig.UPDATE_CHECK_INTERVAL_MS
+        if (!force && fresh && recent) return
+        updateStatus = UpdateStatus.Checking
+        scope.launch {
+            updateStatus = UpdateChecker.evaluate(UpdateChecker.fetchLatest(), currentVersion)
+            lastUpdateCheckMs = SystemClock.elapsedRealtime()
+        }
+    }
+
+    // Opening Settings checks GitHub (throttled); leaving Settings closes the update page.
+    LaunchedEffect(tab) {
+        if (tab == AppTab.Settings) checkForUpdates(force = false) else showUpdate = false
+    }
+
     BackHandler(enabled = browserUrl == null && (tab != AppTab.Home || resumeWebUrl != null)) {
         val resume = resumeWebUrl
         if (resume != null) {
@@ -234,6 +293,11 @@ private fun DigiBrowserApp() {
         }
     }
 
+    // Registered after the one above → wins while the update page is open.
+    BackHandler(enabled = browserUrl == null && showUpdate && tab == AppTab.Settings) {
+        showUpdate = false
+    }
+
     if (browserUrl != null) {
         BrowserScreen(
             initialUrl = browserUrl!!,
@@ -241,6 +305,7 @@ private fun DigiBrowserApp() {
             initialActiveTabId = activeTabId,
             onTabsChanged = { list, active -> saveTabs(list, active) },
             searchEngine = searchEngine,
+            privateDns = privateDns,
             onGoHome = {
                 // Explicit Home → next cold start opens Home, not last web
                 resumeWebUrl = null
@@ -273,19 +338,7 @@ private fun DigiBrowserApp() {
                 tab = AppTab.Bookmarks
             },
             onHistoryVisit = { title, url -> recordHistory(title, url) },
-            onDownload = { id, name, sizeLabel ->
-                val next = listOf(
-                    DownloadItem(
-                        id = id,
-                        name = name,
-                        sizeLabel = sizeLabel,
-                        status = DownloadStatus.DOWNLOADING,
-                        progress = 0.02f
-                    )
-                ) + downloads.filterNot { it.id == id }
-                downloads = next
-                persistDownloads(next)
-            }
+            onDownload = { id, name, sizeLabel -> addDownload(id, name, sizeLabel) }
         )
         return
     }
@@ -294,7 +347,18 @@ private fun DigiBrowserApp() {
         selected = tab,
         onSelect = { tab = it },
         tabCount = tabs.size,
-        onOpenTabs = { showTabs = true }
+        onOpenTabs = { showTabs = true },
+        headerTitle = if (tab == AppTab.Settings && showUpdate) context.getString(R.string.update_title) else null,
+        headerActions = if (tab == AppTab.Settings && showUpdate) {
+            {
+                UpdateOverflowMenu(
+                    onCheck = { checkForUpdates(force = true) },
+                    onViewGitHub = {
+                        openUrl(updateStatus.release?.pageUrl ?: BrowserConfig.UPDATE_RELEASES_URL)
+                    }
+                )
+            }
+        } else null
     ) {
         when (tab) {
             AppTab.Home -> HomeScreen(
@@ -326,7 +390,18 @@ private fun DigiBrowserApp() {
                     persistHistory(emptyList())
                 }
             )
-            AppTab.Settings -> SettingsScreen(
+            AppTab.Settings -> if (showUpdate) UpdateScreen(
+                currentVersion = currentVersion,
+                status = updateStatus,
+                downloadId = updateDownloadId,
+                onDownloadStarted = { id, name, sizeLabel ->
+                    updateDownloadId = id
+                    addDownload(id, name, sizeLabel)
+                },
+                onBack = { showUpdate = false }
+            ) else SettingsScreen(
+                updateStatus = updateStatus,
+                onOpenUpdate = { showUpdate = true },
                 searchEngine = searchEngine,
                 onSearchEngineChange = { engine ->
                     searchEngine = engine
@@ -342,6 +417,11 @@ private fun DigiBrowserApp() {
                     adBlockEnabled = enabled
                     Prefs.setAdBlockEnabled(context, enabled)
                 },
+                strongAdBlock = strongAdBlock,
+                onStrongAdBlockChange = { enabled ->
+                    strongAdBlock = enabled
+                    Prefs.setStrongAdBlock(context, enabled)
+                },
                 jsEnabled = jsEnabled,
                 onJsChange = { enabled ->
                     jsEnabled = enabled
@@ -356,6 +436,11 @@ private fun DigiBrowserApp() {
                 onSaveHistoryChange = { enabled ->
                     saveHistoryEnabled = enabled
                     Prefs.setSaveHistory(context, enabled)
+                },
+                privateDns = privateDns,
+                onPrivateDnsChange = { provider ->
+                    privateDns = provider
+                    Prefs.setPrivateDns(context, provider)
                 }
             )
         }

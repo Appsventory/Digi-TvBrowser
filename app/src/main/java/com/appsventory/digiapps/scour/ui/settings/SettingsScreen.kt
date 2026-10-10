@@ -40,6 +40,12 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.content.Intent
+import android.provider.Settings
+import androidx.compose.ui.platform.LocalContext
+import com.appsventory.digiapps.scour.data.PrivateDnsProvider
+import com.appsventory.digiapps.scour.data.UpdateStatus
+import com.appsventory.digiapps.scour.data.appVersionName
 import com.appsventory.digiapps.scour.data.SearchEngine
 import com.appsventory.digiapps.scour.ui.shell.contentEnterFocus
 import com.appsventory.digiapps.scour.ui.theme.DigiColors
@@ -57,16 +63,25 @@ fun SettingsScreen(
     onDesktopModeChange: (Boolean) -> Unit,
     adBlockEnabled: Boolean = true,
     onAdBlockChange: (Boolean) -> Unit = {},
+    strongAdBlock: Boolean = true,
+    onStrongAdBlockChange: (Boolean) -> Unit = {},
     jsEnabled: Boolean = true,
     onJsChange: (Boolean) -> Unit = {},
     blockPopups: Boolean = true,
     onBlockPopupsChange: (Boolean) -> Unit = {},
     saveHistory: Boolean = true,
     onSaveHistoryChange: (Boolean) -> Unit = {},
+    privateDns: PrivateDnsProvider = PrivateDnsProvider.Off,
+    onPrivateDnsChange: (PrivateDnsProvider) -> Unit = {},
+    updateStatus: UpdateStatus = UpdateStatus.Idle,
+    onOpenUpdate: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var engineMenuOpen by remember { mutableStateOf(false) }
     var engineCardFocused by remember { mutableStateOf(false) }
+    var dnsMenuOpen by remember { mutableStateOf(false) }
+    var dnsCardFocused by remember { mutableStateOf(false) }
+    val context = LocalContext.current
 
     Column(
         modifier = modifier
@@ -88,7 +103,7 @@ fun SettingsScreen(
 
         SectionTitle(stringResource(R.string.settings_search_engine))
 
-        // One card, one border, clip — focus never draws outside
+        // Search engine card
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -100,7 +115,6 @@ fun SettingsScreen(
                     else DigiColors.Border,
                     shape = CardShape
                 )
-                .onFocusChanged { /* aggregate via children */ }
         ) {
             SettingsFocusRow(
                 contentEnter = true,
@@ -159,6 +173,106 @@ fun SettingsScreen(
 
         Spacer(Modifier.height(24.dp))
 
+        SectionTitle(stringResource(R.string.settings_private_dns))
+
+        // Private DNS card
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(CardShape)
+                .background(DigiColors.BgCard)
+                .border(
+                    width = if (dnsCardFocused || dnsMenuOpen) 2.dp else 1.dp,
+                    color = if (dnsCardFocused || dnsMenuOpen) DigiColors.FocusRing
+                    else DigiColors.Border,
+                    shape = CardShape
+                )
+        ) {
+            SettingsFocusRow(
+                onFocused = { dnsCardFocused = it },
+                onClick = { dnsMenuOpen = !dnsMenuOpen }
+            ) {
+                Icon(
+                    Icons.Outlined.Shield, null,
+                    tint = DigiColors.Accent,
+                    modifier = Modifier.size(22.dp)
+                )
+                Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
+                    Text(
+                        privateDns.label,
+                        color = DigiColors.TextPrimary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        privateDns.description,
+                        color = DigiColors.TextMuted,
+                        fontSize = 12.sp
+                    )
+                }
+                Icon(
+                    Icons.Outlined.ExpandMore, null,
+                    tint = DigiColors.TextMuted,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+            if (dnsMenuOpen) {
+                PrivateDnsProvider.entries.forEach { provider ->
+                    SettingsFocusRow(
+                        selected = provider == privateDns,
+                        onFocused = { if (it) dnsCardFocused = true },
+                        onClick = {
+                            onPrivateDnsChange(provider)
+                            dnsMenuOpen = false
+                        }
+                    ) {
+                        Column(Modifier.weight(1f).padding(start = 36.dp, end = 14.dp)) {
+                            Text(
+                                provider.label,
+                                color = DigiColors.TextPrimary,
+                                fontSize = 14.sp,
+                                fontWeight = if (provider == privateDns) FontWeight.SemiBold else FontWeight.Normal
+                            )
+                            Text(
+                                provider.description,
+                                color = DigiColors.TextMuted,
+                                fontSize = 11.sp
+                            )
+                        }
+                        if (provider == privateDns) {
+                            Text("✓", color = DigiColors.Accent, fontSize = 16.sp)
+                        }
+                    }
+                }
+            }
+            SettingsFocusRow(
+                onClick = {
+                    runCatching {
+                        context.startActivity(Intent(Settings.ACTION_NETWORK_OPERATOR_SETTINGS))
+                    }.onFailure {
+                        runCatching {
+                            context.startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS))
+                        }
+                    }
+                }
+            ) {
+                Icon(
+                    Icons.Outlined.Info, null,
+                    tint = DigiColors.TextMuted,
+                    modifier = Modifier.size(20.dp)
+                )
+                Text(
+                    stringResource(R.string.settings_open_system_dns),
+                    color = DigiColors.Accent,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(start = 14.dp)
+                )
+            }
+        }
+
+        Spacer(Modifier.height(24.dp))
+
         SectionTitle(stringResource(R.string.settings_display))
         SettingsCard {
             SettingsToggle(
@@ -196,6 +310,13 @@ fun SettingsScreen(
                 onCheckedChange = onAdBlockChange
             )
             SettingsToggle(
+                icon = Icons.Outlined.Shield,
+                title = stringResource(R.string.settings_ads_strong_title),
+                subtitle = stringResource(R.string.settings_ads_strong_sub),
+                checked = strongAdBlock,
+                onCheckedChange = onStrongAdBlockChange
+            )
+            SettingsToggle(
                 icon = Icons.Outlined.Storage,
                 title = stringResource(R.string.settings_history_title),
                 subtitle = stringResource(R.string.settings_history_sub),
@@ -208,13 +329,13 @@ fun SettingsScreen(
 
         SectionTitle(stringResource(R.string.settings_about))
         SettingsCard {
-            SettingsFocusRow(onClick = {}) {
+            SettingsFocusRow(onClick = onOpenUpdate) {
                 Icon(
                     Icons.Outlined.Info, null,
                     tint = DigiColors.TextMuted,
                     modifier = Modifier.size(22.dp)
                 )
-                Column(Modifier.padding(start = 14.dp)) {
+                Column(Modifier.padding(start = 14.dp).weight(1f)) {
                     Text(
                         stringResource(R.string.app_name),
                         color = DigiColors.TextPrimary,
@@ -222,11 +343,12 @@ fun SettingsScreen(
                         fontWeight = FontWeight.Medium
                     )
                     Text(
-                        stringResource(R.string.settings_version, appVersionName()),
+                        stringResource(R.string.settings_version, appVersionName(context)),
                         color = DigiColors.TextMuted,
                         fontSize = 12.sp
                     )
                 }
+                UpdateChip(updateStatus)
             }
         }
     }
@@ -337,13 +459,29 @@ private fun SettingsToggle(
     }
 }
 
-/** Real versionName from the manifest (no hardcoded "1.0"). */
+/** Right side of the version row: checking / up to date / update available / failed. */
 @Composable
-private fun appVersionName(): String {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    return remember {
-        runCatching {
-            context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull().orEmpty()
+private fun UpdateChip(status: UpdateStatus) {
+    val (text, color) = when (status) {
+        UpdateStatus.Idle -> return
+        UpdateStatus.Checking -> stringResource(R.string.settings_update_checking) to DigiColors.TextMuted
+        UpdateStatus.Failed -> stringResource(R.string.settings_update_failed) to DigiColors.TextMuted
+        is UpdateStatus.UpToDate -> stringResource(R.string.settings_update_latest) to DigiColors.TextMuted
+        is UpdateStatus.Available ->
+            stringResource(R.string.settings_update_available, status.release.tag) to DigiColors.Accent
     }
+    Text(
+        text,
+        color = color,
+        fontSize = 13.sp,
+        fontWeight = if (status is UpdateStatus.Available) FontWeight.SemiBold else FontWeight.Normal,
+        modifier = Modifier
+            .then(
+                if (status is UpdateStatus.Available) {
+                    Modifier
+                        .background(DigiColors.AccentDim, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                } else Modifier
+            )
+    )
 }

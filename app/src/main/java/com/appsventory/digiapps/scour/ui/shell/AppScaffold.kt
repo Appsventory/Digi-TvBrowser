@@ -78,6 +78,9 @@ fun AppScaffold(
     onSelect: (AppTab) -> Unit,
     tabCount: Int = 0,
     onOpenTabs: () -> Unit = {},
+    /** Sub-page title (replaces the tab title) and its right-aligned actions, e.g. a ⋮ menu. */
+    headerTitle: String? = null,
+    headerActions: (@Composable () -> Unit)? = null,
     content: @Composable () -> Unit
 ) {
     val contentEnterFocus = remember { FocusRequester() }
@@ -101,6 +104,8 @@ fun AppScaffold(
                     onSelect = onSelect,
                     tabCount = tabCount,
                     onOpenTabs = onOpenTabs,
+                    headerTitle = headerTitle,
+                    headerActions = headerActions,
                     content = content
                 )
             } else {
@@ -108,6 +113,8 @@ fun AppScaffold(
                     selected = selected,
                     onSelect = onSelect,
                     contentEnterFocus = contentEnterFocus,
+                    headerTitle = headerTitle,
+                    headerActions = headerActions,
                     content = content
                 )
             }
@@ -121,6 +128,8 @@ private fun CompactScaffold(
     onSelect: (AppTab) -> Unit,
     tabCount: Int,
     onOpenTabs: () -> Unit,
+    headerTitle: String?,
+    headerActions: (@Composable () -> Unit)?,
     content: @Composable () -> Unit
 ) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -214,11 +223,13 @@ private fun CompactScaffold(
                 }
                 Spacer(Modifier.width(12.dp))
                 Text(
-                    tabTitle(selected),
+                    headerTitle ?: tabTitle(selected),
                     color = DigiColors.TextPrimary,
                     fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f)
                 )
+                headerActions?.invoke()
             }
             Box(
                 modifier = Modifier
@@ -306,6 +317,8 @@ private fun ExpandedScaffold(
     selected: AppTab,
     onSelect: (AppTab) -> Unit,
     contentEnterFocus: FocusRequester,
+    headerTitle: String?,
+    headerActions: (@Composable () -> Unit)?,
     content: @Composable () -> Unit
 ) {
     Box(Modifier.fillMaxSize()) {
@@ -359,7 +372,26 @@ private fun ExpandedScaffold(
                     }
                     .padding(start = 28.dp, end = 28.dp, top = 28.dp, bottom = 24.dp)
             ) {
-                content()
+                if (headerTitle == null) {
+                    content()
+                } else {
+                    Column(Modifier.fillMaxSize()) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                headerTitle,
+                                color = DigiColors.TextPrimary,
+                                fontSize = 28.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.weight(1f)
+                            )
+                            headerActions?.invoke()
+                        }
+                        Box(Modifier.weight(1f).fillMaxWidth()) { content() }
+                    }
+                }
             }
         }
     }

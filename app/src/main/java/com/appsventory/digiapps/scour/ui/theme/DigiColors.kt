@@ -51,6 +51,13 @@ object DigiColors {
         0xFF8B5CF6, 0xFFF59E0B
     )
 
+    // Video player
+    val PlayerBg = Color.Black
+    val PlayerScrim = Color(0xCC000000)
+    val PlayerSubtitleBg = Color(0xB3000000)
+    val PlayerTrack = Color(0x55FFFFFF)
+    val PlayerBuffered = Color(0x99FFFFFF)
+
     // Cursor
     val CursorOuter = Color.White
     val CursorMid = Color(0xFF0F172A)
