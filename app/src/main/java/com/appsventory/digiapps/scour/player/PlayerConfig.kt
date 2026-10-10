@@ -79,6 +79,16 @@ object PlayerConfig {
         "})();"
     const val VIDEO_BRIDGE_NAME = "DigiVideo"
 
+    // Page fullscreen (WebChromeClient custom view): remote keys + virtual cursor
+    const val WEB_SPEED_STEP = 0.25f
+    const val WEB_SPEED_MIN = 0.25f
+    const val WEB_SPEED_MAX = 3f
+    const val WEB_CURSOR_STEP_DP = 24
+    const val WEB_CURSOR_ACCEL_REPEATS = 12
+    const val WEB_CURSOR_RADIUS_DP = 10
+    const val WEB_CLICK_PRESS_MS = 60L
+    const val WEB_HINT_MS = 5_000L
+
     val SPEEDS = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
     const val DEFAULT_SPEED = 1f
 

@@ -73,6 +73,7 @@ import com.appsventory.digiapps.scour.ui.shell.CompactWidthBreakpoint
 import com.appsventory.digiapps.scour.ui.shell.MenuItem
 import com.appsventory.digiapps.scour.ui.shell.TabCountIcon
 import com.appsventory.digiapps.scour.ui.shell.contentEnterFocus
+import com.appsventory.digiapps.scour.data.BrowserConfig
 import com.appsventory.digiapps.scour.ui.theme.DigiColors
 import kotlinx.coroutines.delay
 import androidx.compose.ui.res.stringResource
@@ -86,18 +87,19 @@ fun HomeScreen(
     searchEngine: SearchEngine = SearchEngine.Google,
     tabCount: Int = 0,
     onOpenTabs: () -> Unit = {},
+    onOpenSearch: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     // TV / large screen: tabs button sits in the header. Phone: it lives in the sidebar.
     val showTabsButton = LocalConfiguration.current.screenWidthDp.dp >= CompactWidthBreakpoint
-    var query by remember { mutableStateOf("") }
     val searchChromeFocus = remember { FocusRequester() }
     val textFieldFocus = remember { FocusRequester() }
     val moreMenuFocus = remember { FocusRequester() }
     val firstShortcutFocus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
-    var searchEditing by remember { mutableStateOf(false) }
+
+    // Suggestions and text entry live on the dedicated Search page.
 
     var shortcuts by remember { mutableStateOf(Prefs.getShortcuts(context)) }
     var showAddDialog by remember { mutableStateOf(false) }
@@ -109,13 +111,6 @@ fun HomeScreen(
         Prefs.setShortcuts(context, list)
     }
 
-    fun submit() {
-        keyboard?.hide()
-        searchEditing = false
-        val target = normalizeInput(query, searchEngine)
-        if (target.isNotBlank()) onNavigate(target)
-    }
-
     LaunchedEffect(Unit) {
         keyboard?.hide()
         delay(100)
@@ -123,16 +118,6 @@ fun HomeScreen(
         keyboard?.hide()
     }
 
-    LaunchedEffect(searchEditing) {
-        if (searchEditing) {
-            delay(16)
-            runCatching { textFieldFocus.requestFocus() }
-            delay(50)
-            keyboard?.show()
-        } else {
-            keyboard?.hide()
-        }
-    }
 
     Column(
         modifier = modifier
@@ -186,16 +171,14 @@ fun HomeScreen(
             modifier = Modifier.padding(top = 6.dp, bottom = 18.dp)
         )
 
+        // Search bar is an entry point only — activation opens the dedicated Search page.
         SearchBar(
-            query = query,
-            onQueryChange = { query = it },
-            onSubmit = { submit() },
-            editing = searchEditing,
-            onStartEditing = { searchEditing = true },
-            onStopEditing = {
-                searchEditing = false
-                keyboard?.hide()
-            },
+            query = "",
+            onQueryChange = {},
+            onSubmit = {},
+            editing = false,
+            onStartEditing = { onOpenSearch() },
+            onStopEditing = {},
             chromeFocusRequester = searchChromeFocus,
             textFocusRequester = textFieldFocus,
             downTarget = moreMenuFocus
@@ -240,7 +223,6 @@ fun HomeScreen(
                     upTarget = if (index == 0) moreMenuFocus else null,
                     onOpen = {
                         keyboard?.hide()
-                        searchEditing = false
                         onNavigate(entry.url)
                     },
                     onMenu = { menuShortcut = entry }

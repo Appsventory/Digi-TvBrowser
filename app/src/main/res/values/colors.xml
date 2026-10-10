@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches DigiColors.BgDeep — window/IME resize must not flash system white -->
+    <color name="digi_bg_deep">#FF0A0E17</color>
+    <color name="digi_bg_panel">#FF0B1220</color>
+</resources>

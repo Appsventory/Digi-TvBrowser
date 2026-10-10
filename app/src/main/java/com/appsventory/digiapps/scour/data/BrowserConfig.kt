@@ -20,6 +20,19 @@ object BrowserConfig {
     const val LOAD_TIMEOUT_MS = 20_000L
     const val TOAST_MS = 1_800L
 
+    // Search suggestions
+    const val SUGGEST_DEBOUNCE_MS = 250L
+    const val SUGGEST_TIMEOUT_MS = 4_000
+    const val SUGGEST_MAX_REMOTE = 6
+    const val SUGGEST_MAX_LOCAL = 2
+
+    // Address-bar editing
+    const val URL_FOCUS_RETRIES = 10
+    const val KEYBOARD_SHOW_DELAY_MS = 80L
+
+    // "Video detected" card hides itself so it never lingers over the page
+    const val STREAM_PROMPT_TIMEOUT_MS = 10_000L
+
     // App updates (GitHub releases)
     const val GITHUB_REPO = "Appsventory/Digi-TvBrowser"
     const val UPDATE_API_URL = "https://api.github.com/repos/$GITHUB_REPO/releases/latest"

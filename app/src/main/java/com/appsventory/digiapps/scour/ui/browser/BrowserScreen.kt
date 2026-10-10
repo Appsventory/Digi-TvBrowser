@@ -18,6 +18,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.ViewConfiguration
 import android.view.InputDevice
 import android.view.MotionEvent
 import android.content.Context
@@ -56,6 +57,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
@@ -68,9 +70,6 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowForward
@@ -111,7 +110,6 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -123,9 +121,6 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -140,6 +135,7 @@ import com.appsventory.digiapps.scour.data.isRealUrl
 import com.appsventory.digiapps.scour.data.Prefs
 import com.appsventory.digiapps.scour.data.PrivateDnsProvider
 import com.appsventory.digiapps.scour.data.TabThumbs
+import com.appsventory.digiapps.scour.ui.shell.MenuItem
 import com.appsventory.digiapps.scour.data.SearchEngine
 import com.appsventory.digiapps.scour.data.UserAgents
 import com.appsventory.digiapps.scour.player.DetectedStream
@@ -265,6 +261,8 @@ fun BrowserScreen(
     var chromeVisible by remember { mutableStateOf(false) }
     var urlFieldFocused by remember { mutableStateOf(false) }
     var urlEditing by remember { mutableStateOf(false) }
+    /** True while the BasicTextField itself holds focus (child of chrome, not chrome). */
+    var urlTextFocused by remember { mutableStateOf(false) }
     val isSecure = urlText.startsWith("https://", ignoreCase = true)
 
     var cursorX by remember { mutableFloatStateOf(0f) }
@@ -477,17 +475,22 @@ fun BrowserScreen(
     }
 
     fun clearAllTabs() {
-        val id = System.currentTimeMillis()
-        val fresh = BrowserTab(id, BrowserConfig.HOME_URL, context.getString(R.string.tab_new))
-        TabThumbs.map.clear()
+        // Completely clear every tab, drop resources, leave no replacement, go Home.
+        // Persist synchronously: onGoHome() removes this composition, which would cancel
+        // the LaunchedEffect(tabs) that normally calls onTabsChanged — leaving MainActivity
+        // with a stale non-empty list (the leftover "one tab" after Clear).
         val old = tabs.map { it.id }
-        tabs = listOf(fresh)
-        activeTabId = id
-        urlText = fresh.url
-        pageTitle = fresh.title
+        TabThumbs.map.clear()
+        tabs = emptyList()
+        activeTabId = -1L
         old.forEach { releaseTab(it) }
         tabsExpanded = false
         chromeVisible = false
+        urlEditing = false
+        urlFieldFocused = false
+        keyboard?.hide()
+        onTabsChanged(emptyList(), -1L)
+        onGoHome()
     }
 
     // Keep active tab metadata in sync with live navigation
@@ -517,6 +520,7 @@ fun BrowserScreen(
         keyboard?.hide()
         urlFieldFocused = false
         urlEditing = false
+        urlTextFocused = false
         if (isTv) webFocusRequester.requestFocus()
         else webView?.requestFocus()
     }
@@ -527,6 +531,13 @@ fun BrowserScreen(
         dirY = 0f
         keyboard?.hide()
         webView?.clearFocus()
+        // The toolbar may have been hidden while the page (or the player) changed history.
+        webView?.let {
+            canGoBack = it.canGoBack()
+            canGoForward = it.canGoForward()
+        }
+        // Opening the toolbar answers the "Video detected" card; the panel's Video button reopens it.
+        streamPromptDismissed = true
     }
 
     LaunchedEffect(boxW, boxH) {
@@ -609,17 +620,20 @@ fun BrowserScreen(
         }
     }
 
+    // Progressive cursor acceleration while a D-pad direction is held.
+    // Stops immediately when dirX/dirY clear (key release, click, chrome open, dispose).
     LaunchedEffect(dirX, dirY) {
         if (dirX == 0f && dirY == 0f) return@LaunchedEffect
-        holdStartMs = SystemClock.uptimeMillis()
+        val startedAt = holdStartMs
         var lastNanos = withFrameNanos { it }
         while (dirX != 0f || dirY != 0f) {
             val now = withFrameNanos { it }
             val dt = ((now - lastNanos) / 1_000_000_000f).coerceIn(0f, 0.05f)
             lastNanos = now
-            val heldFor = (SystemClock.uptimeMillis() - holdStartMs) / 1000f
-            val accel = (heldFor / 0.4f).coerceIn(0f, 1f)
-            val speed = 120f + 240f * accel
+            val heldFor = (SystemClock.uptimeMillis() - startedAt) / 1000f
+            // 0–0.15s: base speed · 0.15–0.6s: ramp · after: max
+            val accel = ((heldFor - 0.15f) / 0.45f).coerceIn(0f, 1f)
+            val speed = 100f + 320f * accel // ~100 → ~420 px/s
             val len = sqrt(dirX * dirX + dirY * dirY).coerceAtLeast(0.001f)
             applyMove((dirX / len) * speed * dt, (dirY / len) * speed * dt)
         }
@@ -634,14 +648,28 @@ fun BrowserScreen(
     }
 
     LaunchedEffect(urlEditing) {
-        if (urlEditing) {
-            delay(32)
-            runCatching { urlTextFocus.requestFocus() }
-            delay(60)
-            keyboard?.show()
-        } else {
+        if (!urlEditing) {
             keyboard?.hide()
+            urlTextFocused = false
         }
+    }
+
+    // End editing only when the IME *was* visible and then becomes hidden
+    // (system Back consumed by the IME). Do NOT end editing merely because
+    // the keyboard has not appeared yet — that cancelled OK/Enter activation
+    // within ~120ms before the soft keyboard could show.
+    var imeWasVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(imeVisible) {
+        if (imeWasVisible && !imeVisible && urlEditing) {
+            // System Back closed the IME. End the *editing* session only.
+            // Leave focus alone: disposing UrlTextField moves focus to the
+            // focusable chrome Row (parent), which updates urlFieldFocused via
+            // onFocusChanged. clearFocus()+requestFocus() previously left D-pad
+            // one event behind (stale dual highlight).
+            urlEditing = false
+            urlTextFocused = false
+        }
+        imeWasVisible = imeVisible
     }
 
     val rankedStreams = remember(detectedStreams, playingDurationMs) {
@@ -649,7 +677,15 @@ fun BrowserScreen(
     }
     val streamPromptVisible = rankedStreams.isNotEmpty() && !streamPromptDismissed &&
         (streamPromptForced || rankedStreams.any { StreamRanking.isEligible(it) }) &&
-        !chromeVisible && !tabsExpanded && playerRequest == null
+        !chromeVisible && !tabsExpanded && playerRequest == null && customView == null
+
+    // The card must not linger over the page (or hold the D-pad focus) if it is ignored.
+    LaunchedEffect(streamPromptVisible) {
+        if (streamPromptVisible) {
+            delay(BrowserConfig.STREAM_PROMPT_TIMEOUT_MS)
+            streamPromptDismissed = true
+        }
+    }
 
     // The player screen has its own BackHandler; this one stays out of its way.
     BackHandler(enabled = playerRequest == null) {
@@ -657,17 +693,15 @@ fun BrowserScreen(
             tabsExpanded -> {
                 tabsExpanded = false
             }
-            streamPromptVisible -> streamPromptDismissed = true
-            urlEditing -> {
+            // Editing: hide keyboard + end editor session. Do not force-clear /
+            // re-request focus — removing UrlTextField transfers focus to the
+            // parent chrome Row in the same frame, so the ring tracks real focus.
+            urlEditing || urlTextFocused -> {
                 urlEditing = false
+                urlTextFocused = false
                 keyboard?.hide()
-                runCatching { homeBtnFocus.requestFocus() }
             }
-            urlFieldFocused -> {
-                keyboard?.hide()
-                urlFieldFocused = false
-                runCatching { homeBtnFocus.requestFocus() }
-            }
+            // Chrome visible (whether address has nav focus or not): existing toolbar Back.
             chromeVisible -> hideChrome()
             else -> showChrome()
         }
@@ -1082,7 +1116,10 @@ fun BrowserScreen(
             .background(DigiColors.BgDeep)
             .statusBarsPadding()
             .navigationBarsPadding()
-            .imePadding()
+            // IME inset is applied on the bottom chrome panel itself (see chromeVisible
+            // block) so the toolbar tracks keyboard height even when adjustResize does not
+            // shrink this hierarchy. Avoid padding the whole tree here — that left the
+            // bottom-aligned panel sitting in the unpadded outer Box on some devices.
     ) {
     Box(
         modifier = Modifier
@@ -1122,34 +1159,52 @@ fun BrowserScreen(
                     when (event.key) {
                         Key.DirectionLeft -> {
                             if (down) {
-                                applyMove(-step, 0f)
-                                if (dirX != -1f) { dirX = -1f; holdStartMs = SystemClock.uptimeMillis() }
+                                // First press: one discrete step + start hold tracking.
+                                // Native key-repeats are ignored; continuous acceleration owns movement.
+                                if (dirX != -1f) {
+                                    applyMove(-step, 0f)
+                                    dirX = -1f
+                                    dirY = 0f
+                                    holdStartMs = SystemClock.uptimeMillis()
+                                }
                             }
-                            if (up) dirX = 0f
+                            if (up) { dirX = 0f }
                             true
                         }
                         Key.DirectionRight -> {
                             if (down) {
-                                applyMove(step, 0f)
-                                if (dirX != 1f) { dirX = 1f; holdStartMs = SystemClock.uptimeMillis() }
+                                if (dirX != 1f) {
+                                    applyMove(step, 0f)
+                                    dirX = 1f
+                                    dirY = 0f
+                                    holdStartMs = SystemClock.uptimeMillis()
+                                }
                             }
-                            if (up) dirX = 0f
+                            if (up) { dirX = 0f }
                             true
                         }
                         Key.DirectionUp -> {
                             if (down) {
-                                applyMove(0f, -step)
-                                if (dirY != -1f) { dirY = -1f; holdStartMs = SystemClock.uptimeMillis() }
+                                if (dirY != -1f) {
+                                    applyMove(0f, -step)
+                                    dirY = -1f
+                                    dirX = 0f
+                                    holdStartMs = SystemClock.uptimeMillis()
+                                }
                             }
-                            if (up) dirY = 0f
+                            if (up) { dirY = 0f }
                             true
                         }
                         Key.DirectionDown -> {
                             if (down) {
-                                applyMove(0f, step)
-                                if (dirY != 1f) { dirY = 1f; holdStartMs = SystemClock.uptimeMillis() }
+                                if (dirY != 1f) {
+                                    applyMove(0f, step)
+                                    dirY = 1f
+                                    dirX = 0f
+                                    holdStartMs = SystemClock.uptimeMillis()
+                                }
                             }
-                            if (up) dirY = 0f
+                            if (up) { dirY = 0f }
                             true
                         }
                         Key.Enter, Key.NumPadEnter, Key.DirectionCenter -> {
@@ -1290,10 +1345,16 @@ fun BrowserScreen(
 
         // ===== Bottom panel — overlay on top of WebView, solid background =====
         if (chromeVisible) {
+            // Sit above the IME: use explicit ime bottom inset (same source as imeVisible).
+            // Bottom inset from WindowInsets.ime (same as imeVisible). Lifts the bar when the window
+            // does not resize (common on TV / some OEM keyboards) so the bar is not covered.
+            val imePad = with(density) { imeBottom.toDp() }
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(bottom = imePad)
                     .background(DigiColors.BgPanel)
                     .pointerInput(Unit) {
                         detectVerticalDragGestures { _, dragAmount ->
@@ -1329,15 +1390,32 @@ fun BrowserScreen(
                                 .height(44.dp)
                                 .background(DigiColors.BgCard, RoundedCornerShape(22.dp))
                                 .border(
-                                    width = if (urlFieldFocused || urlEditing) 2.dp else 1.dp,
-                                    color = if (urlFieldFocused || urlEditing) DigiColors.FocusRing
+                                    width = if (urlEditing || urlFieldFocused) 2.dp else 1.dp,
+                                    color = if (urlEditing || urlFieldFocused) DigiColors.FocusRing
                                     else DigiColors.Border,
                                     shape = RoundedCornerShape(22.dp)
                                 )
                                 .focusRequester(urlChromeFocus)
                                 .onFocusChanged { fs -> urlFieldFocused = fs.isFocused }
                                 .focusable()
-                                .clickable { urlEditing = true }
+                                .onPreviewKeyEvent { ev ->
+                                    if (urlEditing) return@onPreviewKeyEvent false
+                                    val isOk = ev.key == Key.DirectionCenter ||
+                                        ev.key == Key.Enter ||
+                                        ev.key == Key.NumPadEnter
+                                    if (!isOk) return@onPreviewKeyEvent false
+                                    // KeyDown starts editing immediately (TV remotes often
+                                    // deliver OK more reliably on down). KeyUp is consumed
+                                    // so it cannot cancel or re-trigger after the field mounts.
+                                    if (ev.type == KeyEventType.KeyDown) {
+                                        urlEditing = true
+                                    }
+                                    true
+                                }
+                                .then(
+                                    if (urlEditing) Modifier
+                                    else Modifier.clickable { urlEditing = true }
+                                )
                                 .padding(horizontal = 12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -1348,27 +1426,35 @@ fun BrowserScreen(
                             )
                             Spacer(Modifier.width(8.dp))
                             if (urlEditing) {
-                                BasicTextField(
+                                UrlTextField(
                                     value = urlText,
                                     onValueChange = { urlText = it },
-                                    singleLine = true,
-                                    textStyle = androidx.compose.ui.text.TextStyle(
-                                        color = DigiColors.TextPrimary,
-                                        fontSize = 13.sp
-                                    ),
-                                    keyboardOptions = KeyboardOptions(
-                                        imeAction = androidx.compose.ui.text.input.ImeAction.Go,
-                                        keyboardType = KeyboardType.Uri
-                                    ),
-                                    keyboardActions = KeyboardActions(onGo = {
+                                    onGo = {
                                         doLoad(urlText)
                                         urlEditing = false
+                                        urlTextFocused = false
                                         keyboard?.hide()
-                                    }),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .focusRequester(urlTextFocus),
-                                    cursorBrush = androidx.compose.ui.graphics.SolidColor(DigiColors.Accent)
+                                    },
+                                    fontSize = 13.sp,
+                                    focusRequester = urlTextFocus,
+                                    modifier = Modifier.weight(1f),
+                                    onFocusChange = { focused ->
+                                        if (focused) {
+                                            urlTextFocused = true
+                                        } else if (urlTextFocused) {
+                                            urlTextFocused = false
+                                            // Focus left the editor (e.g. D-pad Down). End the
+                                            // session so urlEditing cannot keep the chrome ring
+                                            // alive after navigation focus has already moved.
+                                            scope.launch {
+                                                kotlinx.coroutines.delay(32)
+                                                if (!urlTextFocused && urlEditing) {
+                                                    urlEditing = false
+                                                    keyboard?.hide()
+                                                }
+                                            }
+                                        }
+                                    }
                                 )
                             } else {
                                 Text(
@@ -1456,15 +1542,32 @@ fun BrowserScreen(
                                 .height(44.dp)
                                 .background(DigiColors.BgCard, RoundedCornerShape(22.dp))
                                 .border(
-                                    width = if (urlFieldFocused || urlEditing) 2.dp else 1.dp,
-                                    color = if (urlFieldFocused || urlEditing) DigiColors.FocusRing
+                                    width = if (urlEditing || urlFieldFocused) 2.dp else 1.dp,
+                                    color = if (urlEditing || urlFieldFocused) DigiColors.FocusRing
                                     else DigiColors.Border,
                                     shape = RoundedCornerShape(22.dp)
                                 )
                                 .focusRequester(urlChromeFocus)
                                 .onFocusChanged { fs -> urlFieldFocused = fs.isFocused }
                                 .focusable()
-                                .clickable { urlEditing = true }
+                                .onPreviewKeyEvent { ev ->
+                                    if (urlEditing) return@onPreviewKeyEvent false
+                                    val isOk = ev.key == Key.DirectionCenter ||
+                                        ev.key == Key.Enter ||
+                                        ev.key == Key.NumPadEnter
+                                    if (!isOk) return@onPreviewKeyEvent false
+                                    // KeyDown starts editing immediately (TV remotes often
+                                    // deliver OK more reliably on down). KeyUp is consumed
+                                    // so it cannot cancel or re-trigger after the field mounts.
+                                    if (ev.type == KeyEventType.KeyDown) {
+                                        urlEditing = true
+                                    }
+                                    true
+                                }
+                                .then(
+                                    if (urlEditing) Modifier
+                                    else Modifier.clickable { urlEditing = true }
+                                )
                                 .padding(horizontal = 16.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -1475,27 +1578,35 @@ fun BrowserScreen(
                             )
                             Spacer(Modifier.width(10.dp))
                             if (urlEditing) {
-                                BasicTextField(
+                                UrlTextField(
                                     value = urlText,
                                     onValueChange = { urlText = it },
-                                    singleLine = true,
-                                    textStyle = androidx.compose.ui.text.TextStyle(
-                                        color = DigiColors.TextPrimary,
-                                        fontSize = 15.sp
-                                    ),
-                                    keyboardOptions = KeyboardOptions(
-                                        imeAction = androidx.compose.ui.text.input.ImeAction.Go,
-                                        keyboardType = KeyboardType.Uri
-                                    ),
-                                    keyboardActions = KeyboardActions(onGo = {
+                                    onGo = {
                                         doLoad(urlText)
                                         urlEditing = false
+                                        urlTextFocused = false
                                         keyboard?.hide()
-                                    }),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .focusRequester(urlTextFocus),
-                                    cursorBrush = androidx.compose.ui.graphics.SolidColor(DigiColors.Accent)
+                                    },
+                                    fontSize = 15.sp,
+                                    focusRequester = urlTextFocus,
+                                    modifier = Modifier.weight(1f),
+                                    onFocusChange = { focused ->
+                                        if (focused) {
+                                            urlTextFocused = true
+                                        } else if (urlTextFocused) {
+                                            urlTextFocused = false
+                                            // Focus left the editor (e.g. D-pad Down). End the
+                                            // session so urlEditing cannot keep the chrome ring
+                                            // alive after navigation focus has already moved.
+                                            scope.launch {
+                                                kotlinx.coroutines.delay(32)
+                                                if (!urlTextFocused && urlEditing) {
+                                                    urlEditing = false
+                                                    keyboard?.hide()
+                                                }
+                                            }
+                                        }
+                                    }
                                 )
                             } else {
                                 Text(
@@ -1646,6 +1757,7 @@ fun BrowserScreen(
     customView?.let { view ->
         FullscreenWebVideo(
             view = view,
+            webView = webView,
             callback = customViewCallback,
             onExit = { customView = null; customViewCallback = null }
         )
@@ -1744,6 +1856,10 @@ fun TabSwitcherOverlay(
     val clearFr = remember { FocusRequester() }
     val addFr = remember { FocusRequester() }
     val doneFr = remember { FocusRequester() }
+    var menuTab by remember { mutableStateOf<BrowserTab?>(null) }
+    val longPressTimeout = remember {
+        ViewConfiguration.getLongPressTimeout().toLong()
+    }
 
     val screenW = LocalConfiguration.current.screenWidthDp
     // Phone: 2 cols · tablet/TV: at least 3
@@ -1940,6 +2056,8 @@ fun TabSwitcherOverlay(
                                 val index = rowIndex * columns + colIndex
                                 val selected = tab.id == activeTabId
                                 var focused by remember(tab.id) { mutableStateOf(false) }
+                                var okDownAt by remember(tab.id) { mutableStateOf(0L) }
+                                var upDownAt by remember(tab.id) { mutableStateOf(0L) }
                                 val fr = tabFr[tab.id]!!
                                 val thumb = thumbs[tab.id]
                                 val shape = RoundedCornerShape(16.dp)
@@ -1957,14 +2075,61 @@ fun TabSwitcherOverlay(
                                         }
                                         .onFocusChanged { focused = it.isFocused }
                                         .onPreviewKeyEvent { ev ->
-                                            val isOk = ev.key == Key.DirectionCenter ||
-                                                ev.key == Key.Enter ||
-                                                ev.key == Key.NumPadEnter
-                                            if (!isOk) return@onPreviewKeyEvent false
-                                            if (ev.type == KeyEventType.KeyUp) {
-                                                onSelect(tab.id)
-                                                true
-                                            } else true
+                                            // Long-press D-Pad Up → context menu (View / Delete).
+                                            // Consume Up while held; short release moves focus manually.
+                                            if (ev.key == Key.DirectionUp) {
+                                                when (ev.type) {
+                                                    KeyEventType.KeyDown -> {
+                                                        if (upDownAt == 0L) {
+                                                            upDownAt = SystemClock.uptimeMillis()
+                                                        }
+                                                        val held = SystemClock.uptimeMillis() - upDownAt
+                                                        if (held >= longPressTimeout && menuTab == null) {
+                                                            menuTab = tab
+                                                        }
+                                                        true // always consume so framework does not move focus mid-hold
+                                                    }
+                                                    KeyEventType.KeyUp -> {
+                                                        val started = upDownAt
+                                                        upDownAt = 0L
+                                                        if (started == 0L) return@onPreviewKeyEvent true
+                                                        val held = SystemClock.uptimeMillis() - started
+                                                        if (held >= longPressTimeout) {
+                                                            if (menuTab == null) menuTab = tab
+                                                            true
+                                                        } else {
+                                                            // Short press: move focus to the Up target ourselves.
+                                                            runCatching { tabUp(index).requestFocus() }
+                                                            true
+                                                        }
+                                                    }
+                                                    else -> false
+                                                }
+                                            } else {
+                                                val isOk = ev.key == Key.DirectionCenter ||
+                                                    ev.key == Key.Enter ||
+                                                    ev.key == Key.NumPadEnter
+                                                if (!isOk) return@onPreviewKeyEvent false
+                                                when (ev.type) {
+                                                    KeyEventType.KeyDown -> {
+                                                        if (okDownAt == 0L) {
+                                                            okDownAt = SystemClock.uptimeMillis()
+                                                        }
+                                                        true
+                                                    }
+                                                    KeyEventType.KeyUp -> {
+                                                        val held = SystemClock.uptimeMillis() - okDownAt
+                                                        okDownAt = 0L
+                                                        if (held >= longPressTimeout) {
+                                                            menuTab = tab
+                                                        } else {
+                                                            onSelect(tab.id)
+                                                        }
+                                                        true
+                                                    }
+                                                    else -> false
+                                                }
+                                            }
                                         }
                                         .clickable { onSelect(tab.id) }
                                         .background(DigiColors.BgCard, shape)
@@ -2067,6 +2232,35 @@ fun TabSwitcherOverlay(
                     }
                     Spacer(Modifier.height(24.dp))
                 }
+            }
+        }
+    }
+
+    // Per-tab context menu (long-press Up or OK on a focused tab)
+    menuTab?.let { target ->
+        Dialog(onDismissRequest = { menuTab = null }) {
+            Column(
+                modifier = Modifier
+                    .widthIn(min = 260.dp)
+                    .background(DigiColors.BgPanel, RoundedCornerShape(16.dp))
+                    .border(1.dp, DigiColors.Border, RoundedCornerShape(16.dp))
+                    .padding(vertical = 8.dp)
+            ) {
+                Text(
+                    target.title.ifBlank { stringResource(R.string.tab_default_title) },
+                    color = DigiColors.TextMuted,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+                MenuItem(stringResource(R.string.action_view), onClick = {
+                    menuTab = null
+                    onSelect(target.id)
+                })
+                MenuItem(stringResource(R.string.action_delete), onClick = {
+                    menuTab = null
+                    onClose(target.id)
+                })
+                MenuItem(stringResource(R.string.action_cancel), onClick = { menuTab = null })
             }
         }
     }

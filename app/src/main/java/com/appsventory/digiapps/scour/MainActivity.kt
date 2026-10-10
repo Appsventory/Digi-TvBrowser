@@ -2,9 +2,12 @@ package com.appsventory.digiapps.scour
 
 import android.app.DownloadManager
 import android.os.Bundle
+import android.view.WindowManager
+import android.webkit.CookieManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.core.view.WindowCompat
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -42,10 +45,12 @@ import com.appsventory.digiapps.scour.ui.downloads.DownloadsScreen
 import com.appsventory.digiapps.scour.ui.history.HistoryItem
 import com.appsventory.digiapps.scour.ui.history.HistoryScreen
 import com.appsventory.digiapps.scour.ui.home.HomeScreen
+import com.appsventory.digiapps.scour.ui.search.SearchScreen
 import com.appsventory.digiapps.scour.ui.settings.SettingsScreen
 import com.appsventory.digiapps.scour.ui.shell.AppScaffold
 import com.appsventory.digiapps.scour.ui.shell.AppTab
 import com.appsventory.digiapps.scour.ui.theme.DigiBrowserTheme
+import com.appsventory.digiapps.scour.ui.theme.DigiColors
 import com.appsventory.digiapps.scour.ui.update.UpdateScreen
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -53,18 +58,33 @@ import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import android.os.SystemClock
+import androidx.compose.material3.Surface
 
 class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalTvMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Keep content laid out inside system windows so SOFT_INPUT_ADJUST_RESIZE
+        // can shrink the hierarchy when the IME opens (toolbar stays visible).
+        WindowCompat.setDecorFitsSystemWindows(window, true)
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         setContent {
             DigiBrowserTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
+                // Explicit deep background so adjustResize / IME never reveals system white.
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = DigiColors.BgDeep
+                ) {
                     DigiBrowserApp()
                 }
             }
         }
+    }
+
+    /** WebView writes cookies lazily; flush so a login survives the process being killed. */
+    override fun onStop() {
+        super.onStop()
+        CookieManager.getInstance().flush()
     }
 
     /** Home pressed while the native player is playing → shrink into picture-in-picture. */
@@ -83,6 +103,7 @@ private fun DigiBrowserApp() {
     var tabs by remember { mutableStateOf(Prefs.getTabs(context)) }
     var activeTabId by remember { mutableStateOf(Prefs.getActiveTabId(context)) }
     var showTabs by remember { mutableStateOf(false) }
+    var showSearch by remember { mutableStateOf(false) }
 
     // Active browser page (null = not in browser UI)
     var browserUrl by remember {
@@ -283,7 +304,8 @@ private fun DigiBrowserApp() {
         if (tab == AppTab.Settings) checkForUpdates(force = false) else showUpdate = false
     }
 
-    BackHandler(enabled = browserUrl == null && (tab != AppTab.Home || resumeWebUrl != null)) {
+    // SearchScreen owns Back while open (IME dismiss first, then leave page).
+    BackHandler(enabled = browserUrl == null && !showSearch && (tab != AppTab.Home || resumeWebUrl != null)) {
         val resume = resumeWebUrl
         if (resume != null) {
             resumeWebUrl = null
@@ -343,6 +365,26 @@ private fun DigiBrowserApp() {
         return
     }
 
+    if (showSearch) {
+        SearchScreen(
+            searchEngine = searchEngine,
+            onSearchEngineChange = { engine ->
+                searchEngine = engine
+                Prefs.setSearchEngine(context, engine)
+            },
+            onSubmit = { url ->
+                showSearch = false
+                openUrl(url)
+            },
+            onOpenHistory = {
+                showSearch = false
+                tab = AppTab.History
+            },
+            onDismiss = { showSearch = false }
+        )
+        return
+    }
+
     AppScaffold(
         selected = tab,
         onSelect = { tab = it },
@@ -365,7 +407,8 @@ private fun DigiBrowserApp() {
                 onNavigate = { openUrl(it) },
                 searchEngine = searchEngine,
                 tabCount = tabs.size,
-                onOpenTabs = { showTabs = true }
+                onOpenTabs = { showTabs = true },
+                onOpenSearch = { showSearch = true }
             )
             AppTab.Downloads -> DownloadsScreen(
                 items = downloads,
@@ -475,6 +518,7 @@ private fun DigiBrowserApp() {
             onClear = {
                 TabThumbs.map.clear()
                 saveTabs(emptyList(), -1L)
+                showTabs = false
             },
             onDismiss = { showTabs = false }
         )

@@ -37,7 +37,7 @@ object DigiColors {
     // Focus
     val FocusRing = Accent
     val FocusFill = Accent
-    val FocusOnAccent = Color(0xFF0F172A)
+    val FocusOnAccent = Color(0xFFF1F5F9)
 
     // Misc (previously hardcoded in screens)
     val OnDark = Color.White
@@ -62,6 +62,15 @@ object DigiColors {
     val CursorOuter = Color.White
     val CursorMid = Color(0xFF0F172A)
     val CursorDot = Accent
+
+    // Search suggestions — derived from existing tokens (no independent palette).
+    // Panel sits above the screen gradient; items are translucent surfaces;
+    // focused item uses the same AccentDim fill as other Digi focus controls.
+    val SuggestPanel = BgSelected
+    val SuggestItem = BgCard.copy(alpha = 0.55f)
+    val SuggestItemFocused = AccentDim          // already Accent @ 0.25 — matches shared focus fill
+    val SuggestItemStroke = BorderMuted
+    val SuggestItemStrokeFocused = FocusRing
 
     val ScreenGradient: Brush
         get() = Brush.verticalGradient(

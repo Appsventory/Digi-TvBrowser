@@ -67,6 +67,8 @@
     <string name="tip_dpad_body">Move cursor on TV · tap links on phone</string>
     <string name="tip_shortcut_body">Tap to open · long-press to edit</string>
     <string name="home_search_hint">Search or type a URL</string>
+    <string name="cd_search">Search</string>
+    <string name="search_page_title">Search</string>
     <string name="shortcut_add">Add shortcut</string>
     <string name="shortcut_edit">Edit shortcut</string>
     <string name="field_title">Title</string>
@@ -109,7 +111,7 @@
     <string name="panel_hint_tabs">⌃  Swipe up · focus here + OK/↓ for tabs · %1$d</string>
     <string name="tabs_clear">CLEAR</string>
     <string name="tabs_done">DONE</string>
-    <string name="tabs_help">D-pad move · OK open · Clear = close all</string>
+    <string name="tabs_help">D-pad move · OK open · hold Up for menu · Clear = close all</string>
     <string name="tabs_none">No tabs yet · press + to open one</string>
     <string name="tabs_current">● Current</string>
     <string name="msg_ssl_error">Connection is not private: this site\'s security certificate is invalid.</string>
@@ -181,4 +183,7 @@
     <string name="update_choose_title">Choose a download</string>
     <string name="update_choose_recommended">Recommended · TV + phone</string>
     <string name="settings_update_unknown_version">—</string>
+    <string name="web_fullscreen_hint">←/→ seek · OK play/pause · ↑/↓ speed · MENU cursor</string>
+    <string name="web_fullscreen_cursor_on">Cursor on · MENU for remote keys</string>
+    <string name="web_fullscreen_cursor_off">Remote keys · MENU for cursor</string>
 </resources>

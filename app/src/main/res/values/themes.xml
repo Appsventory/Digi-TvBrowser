@@ -1,4 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-
-    <style name="Theme.DigiBrowser" parent="Theme.AppCompat.DayNight.NoActionBar" />
+    <style name="Theme.DigiBrowser" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:windowBackground">@color/digi_bg_deep</item>
+        <item name="android:colorBackground">@color/digi_bg_deep</item>
+        <item name="android:statusBarColor">@color/digi_bg_deep</item>
+        <item name="android:navigationBarColor">@color/digi_bg_deep</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="colorPrimary">@color/digi_bg_deep</item>
+        <item name="colorPrimaryDark">@color/digi_bg_deep</item>
+        <item name="colorAccent">#FF22D3EE</item>
+    </style>
 </resources>
