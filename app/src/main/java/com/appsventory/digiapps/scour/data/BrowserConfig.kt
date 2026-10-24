@@ -44,6 +44,23 @@ object BrowserConfig {
     // Downloads
     const val DOWNLOAD_POLL_MS = 400L
     const val DOWNLOAD_BANNER_MS = 10_000L
+
+    // Cursor (TV / D-pad browsing mode)
+    /** Discrete movement distance for a single directional key press (px). */
+    const val CURSOR_STEP_PX = 10f
+    /**
+     * Sustained-movement baseline speed (px/s) at the minimum hold multiplier.
+     * Single-press step is independent of this value.
+     */
+    const val CURSOR_BASE_SPEED_PX_S = 100f
+    /** Default long-press speed multiplier applied to continuous movement only. */
+    const val CURSOR_HOLD_SPEED_DEFAULT = 10f
+    const val CURSOR_HOLD_SPEED_MIN = 5f
+    const val CURSOR_HOLD_SPEED_MAX = 20f
+    /** Seconds at base speed before the hold ramp begins. */
+    const val CURSOR_HOLD_DELAY_S = 0.12f
+    /** Seconds to ramp from base to (base × multiplier) after the delay. */
+    const val CURSOR_HOLD_RAMP_S = 0.35f
 }
 
 /** Download row status values (persisted in Prefs). */

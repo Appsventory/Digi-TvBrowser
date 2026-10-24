@@ -132,7 +132,8 @@ private fun DigiBrowserApp() {
         )
     }
     var searchEngine by remember { mutableStateOf(Prefs.getSearchEngine(context)) }
-    var desktopMode by remember { mutableStateOf(Prefs.isDesktopMode(context)) }
+    var userAgentPreset by remember { mutableStateOf(Prefs.getUserAgentPreset(context)) }
+    var cursorHoldSpeed by remember { mutableStateOf(Prefs.getCursorHoldSpeed(context)) }
     var adBlockEnabled by remember { mutableStateOf(Prefs.isAdBlockEnabled(context)) }
     var strongAdBlock by remember { mutableStateOf(Prefs.isStrongAdBlock(context)) }
     var jsEnabled by remember { mutableStateOf(Prefs.isJsEnabled(context)) }
@@ -450,10 +451,15 @@ private fun DigiBrowserApp() {
                     searchEngine = engine
                     Prefs.setSearchEngine(context, engine)
                 },
-                desktopMode = desktopMode,
-                onDesktopModeChange = { enabled ->
-                    desktopMode = enabled
-                    Prefs.setDesktopMode(context, enabled)
+                userAgentPreset = userAgentPreset,
+                onUserAgentPresetChange = { preset ->
+                    userAgentPreset = preset
+                    Prefs.setUserAgentPreset(context, preset)
+                },
+                cursorHoldSpeed = cursorHoldSpeed,
+                onCursorHoldSpeedChange = { value ->
+                    cursorHoldSpeed = value
+                    Prefs.setCursorHoldSpeed(context, value)
                 },
                 adBlockEnabled = adBlockEnabled,
                 onAdBlockChange = { enabled ->
