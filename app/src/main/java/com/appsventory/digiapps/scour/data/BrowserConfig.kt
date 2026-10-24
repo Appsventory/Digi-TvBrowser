@@ -18,6 +18,11 @@ object BrowserConfig {
     const val THUMB_MAX_HEIGHT = 960
 
     const val LOAD_TIMEOUT_MS = 20_000L
+    /**
+     * How long to show the loading pill/cursor after an in-page (SPA) history
+     * change when WebView progress stays at 100 (YouTube Shorts, etc.).
+     */
+    const val SPA_NAV_INDICATOR_MS = 1_400L
     const val TOAST_MS = 1_800L
 
     // Search suggestions

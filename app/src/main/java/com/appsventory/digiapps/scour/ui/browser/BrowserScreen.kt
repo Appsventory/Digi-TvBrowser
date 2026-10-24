@@ -36,12 +36,21 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.ui.focus.focusProperties
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -267,6 +276,14 @@ fun BrowserScreen(
     var canGoForward by remember { mutableStateOf(false) }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var isLoading by remember { mutableStateOf(true) }
+    /**
+     * In-page / SPA navigation (pushState, Shorts, etc.) where WebView progress
+     * often stays at 100 — still show the loading pill + rainbow cursor briefly.
+     */
+    var softLoading by remember { mutableStateOf(false) }
+    /** 0–100 WebView progress; drives the corner pill and loading cursor. */
+    var loadProgress by remember { mutableIntStateOf(0) }
+    var lastHistoryUrl by remember { mutableStateOf("") }
     var loadError by remember { mutableStateOf<String?>(null) }
     var loadStarted by remember { mutableStateOf(false) }
 
@@ -400,6 +417,8 @@ fun BrowserScreen(
         urlText = target
         loadError = null
         isLoading = true
+        softLoading = false
+        loadProgress = 0
         loadStarted = false
         chromeVisible = false
         keyboard?.hide()
@@ -578,6 +597,8 @@ fun BrowserScreen(
 
     fun reloadPage() {
         isLoading = true
+        softLoading = false
+        loadProgress = 0
         webView?.reload()
         hideChrome()
     }
@@ -640,6 +661,15 @@ fun BrowserScreen(
             }
         }
     }
+
+    // SPA / in-page navigations: brief indicator, then clear without a timeout error.
+    LaunchedEffect(softLoading, lastHistoryUrl) {
+        if (!softLoading) return@LaunchedEffect
+        delay(BrowserConfig.SPA_NAV_INDICATOR_MS)
+        softLoading = false
+    }
+
+    val pageBusy = (isLoading || softLoading) && loadError == null
 
     // Progressive cursor acceleration while a D-pad direction is held.
     // Single-press distance is unchanged (CURSOR_STEP_PX). Continuous movement
@@ -1018,9 +1048,14 @@ fun BrowserScreen(
                     if (!active()) return
                     resetDetection()
                     loadStarted = true
+                    softLoading = false
                     isLoading = true
+                    loadProgress = 0
                     loadError = null
-                    if (url != null) urlText = url
+                    if (url != null) {
+                        urlText = url
+                        lastHistoryUrl = url
+                    }
                     syncNav(v)
                 }
                 override fun onPageFinished(v: WebView, url: String) {
@@ -1029,16 +1064,27 @@ fun BrowserScreen(
                         if (strongAdBlockNow(ctx)) v.evaluateJavascript(AdBlock.COSMETIC_JS, null)
                     }
                     if (!active()) { syncUrl(v, url); return }
-                    isLoading = false
+                    // Prefer progress callback for end-of-load; still clear here as a safety net.
+                    if (v.progress >= 100) {
+                        isLoading = false
+                        loadProgress = 100
+                    }
                     loadError = null
                     dirX = 0f
                     dirY = 0f
                     syncUrl(v, url)
                 }
-                // SPA / pushState (YouTube etc.) — URL & history without full reload
+                // SPA / pushState (YouTube Shorts etc.) — URL changes without a full document load.
                 override fun doUpdateVisitedHistory(v: WebView?, url: String?, isReload: Boolean) {
                     super.doUpdateVisitedHistory(v, url, isReload)
                     syncUrl(v, url)
+                    if (!active() || url.isNullOrBlank()) return
+                    val prev = lastHistoryUrl
+                    lastHistoryUrl = url
+                    // In-page navigation: progress often stays at 100, so drive a soft indicator.
+                    if (!isReload && prev.isNotBlank() && url != prev && !isLoading) {
+                        softLoading = true
+                    }
                 }
                 override fun onReceivedError(
                     v: WebView?, r: WebResourceRequest?, e: WebResourceError?
@@ -1079,7 +1125,12 @@ fun BrowserScreen(
                 override fun onProgressChanged(v: WebView?, p: Int) {
                     if (!active()) return
                     if (p > 0) loadStarted = true
-                    if (p >= 100) {
+                    loadProgress = p.coerceIn(0, 100)
+                    if (p < 100) {
+                        // Real document load progress — take over from any soft SPA indicator.
+                        softLoading = false
+                        isLoading = true
+                    } else {
                         isLoading = false
                         syncNav(v)
                     }
@@ -1160,13 +1211,15 @@ fun BrowserScreen(
             // Already alive → no reload, just reflect its state
             urlText = wv.url?.takeIf { it.isRealUrl() } ?: tab.url
             pageTitle = wv.title?.takeIf { it.isNotBlank() } ?: tab.title
-            isLoading = wv.progress < 100
+            loadProgress = wv.progress.coerceIn(0, 100)
+            isLoading = loadProgress < 100
             loadError = null
             canGoBack = wv.canGoBack()
             canGoForward = wv.canGoForward()
             isBookmarked = Prefs.isBookmarked(fl.context, urlText)
         } else {
             isLoading = true
+            loadProgress = 0
             loadStarted = false
             loadError = null
         }
@@ -1308,11 +1361,38 @@ fun BrowserScreen(
                 modifier = Modifier.fillMaxSize()
             )
 
-            if (isLoading && loadError == null) {
-                CircularProgressIndicator(
-                    modifier = Modifier.align(Alignment.Center),
-                    color = DigiColors.Accent
-                )
+            // Bottom-left loading pill — full loads + SPA/in-page navigations.
+            if (pageBusy && !chromeVisible) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 16.dp, bottom = 16.dp)
+                        .background(
+                            DigiColors.BgPanel.copy(alpha = 0.82f),
+                            RoundedCornerShape(24.dp)
+                        )
+                        .border(
+                            1.dp,
+                            DigiColors.Border.copy(alpha = 0.6f),
+                            RoundedCornerShape(24.dp)
+                        )
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        color = DigiColors.Accent,
+                        trackColor = DigiColors.BorderMuted,
+                        strokeWidth = 2.5.dp
+                    )
+                    Text(
+                        stringResource(R.string.page_loading),
+                        color = DigiColors.TextPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(start = 10.dp)
+                    )
+                }
             }
 
             loadError?.let { err ->
@@ -1333,15 +1413,52 @@ fun BrowserScreen(
                 }
             }
 
-            
             if (isTv && cursorVisible && boxW > 0 && !chromeVisible) {
                 val cursorAlpha = if (imeVisible) 0f else 1f
+                val spin = rememberInfiniteTransition(label = "cursorSpin")
+                val spinAngle by spin.animateFloat(
+                    initialValue = 0f,
+                    targetValue = 360f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(900, easing = LinearEasing),
+                        repeatMode = RepeatMode.Restart
+                    ),
+                    label = "cursorAngle"
+                )
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     val r = 14.dp.toPx()
                     val c = Offset(cursorX, cursorY)
-                    drawCircle(DigiColors.CursorOuter.copy(alpha = cursorAlpha), r, c)
-                    drawCircle(DigiColors.CursorMid.copy(alpha = cursorAlpha), r - 3.dp.toPx(), c)
-                    drawCircle(DigiColors.CursorDot.copy(alpha = cursorAlpha), 4.dp.toPx(), c)
+                    if (pageBusy) {
+                        // macOS-style rotating rainbow wait cursor (thin ring)
+                        val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
+                        val rainbow = listOf(
+                            Color(0xFFFF0040),
+                            Color(0xFFFF7A00),
+                            Color(0xFFFFD400),
+                            Color(0xFF3DFF6E),
+                            Color(0xFF00C8FF),
+                            Color(0xFF6B5CFF),
+                            Color(0xFFFF0040)
+                        )
+                        rotate(spinAngle, c) {
+                            drawCircle(
+                                brush = Brush.sweepGradient(rainbow, c),
+                                radius = r,
+                                center = c,
+                                style = stroke,
+                                alpha = cursorAlpha
+                            )
+                        }
+                        drawCircle(
+                            color = DigiColors.CursorMid.copy(alpha = cursorAlpha * 0.85f),
+                            radius = r - 5.dp.toPx(),
+                            center = c
+                        )
+                    } else {
+                        drawCircle(DigiColors.CursorOuter.copy(alpha = cursorAlpha), r, c)
+                        drawCircle(DigiColors.CursorMid.copy(alpha = cursorAlpha), r - 3.dp.toPx(), c)
+                        drawCircle(DigiColors.CursorDot.copy(alpha = cursorAlpha), 4.dp.toPx(), c)
+                    }
                 }
             }
 
