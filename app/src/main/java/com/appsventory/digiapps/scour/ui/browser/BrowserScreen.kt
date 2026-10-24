@@ -226,7 +226,10 @@ fun BrowserScreen(
     var uaMenuOpen by remember { mutableStateOf(false) }
     var isBookmarked by remember { mutableStateOf(Prefs.isBookmarked(context, initialUrl)) }
     var toastMsg by remember { mutableStateOf<String?>(null) }
+    /** In-app download chip (View / dismiss). Null while native player or fullscreen web video is up. */
     var downloadBanner by remember { mutableStateOf<String?>(null) }
+    /** Queued while player/fullscreen is active so the chip can appear after exit. */
+    var pendingDownloadBanner by remember { mutableStateOf<String?>(null) }
 
     // ---- Native video player: streams seen on the current page (reactive) ----
     var detectedStreams by remember { mutableStateOf<List<DetectedStream>>(emptyList()) }
@@ -725,6 +728,17 @@ fun BrowserScreen(
                 urlTextFocused = false
                 keyboard?.hide()
             }
+            // Video toast visible: Back dismisses the card instead of opening the toolbar.
+            streamPromptVisible -> {
+                streamPromptDismissed = true
+                if (isTv) runCatching { webFocusRequester.requestFocus() }
+            }
+            // Download toast: same idea — dismiss before chrome.
+            downloadBanner != null -> {
+                downloadBanner = null
+                pendingDownloadBanner = null
+                if (isTv) runCatching { webFocusRequester.requestFocus() }
+            }
             // Chrome visible (whether address has nav focus or not): existing toolbar Back.
             chromeVisible -> hideChrome()
             else -> showChrome()
@@ -795,12 +809,33 @@ fun BrowserScreen(
         streamPromptForced = false
         // Silence the page so it does not play under the native player.
         webView?.evaluateJavascript(PlayerConfig.PAUSE_WEB_MEDIA_JS, null)
+        // Hide any download chip so it cannot steal D-pad focus from the player.
+        downloadBanner?.let { pendingDownloadBanner = it }
+        downloadBanner = null
         playerRequest = PlayerRequest(stream, detectedSubtitles, rankedStreams)
     }
 
     fun closePlayer() {
         playerRequest = null
+        // Surface a download that started (or was deferred) during playback.
+        pendingDownloadBanner?.let {
+            downloadBanner = it
+            pendingDownloadBanner = null
+        }
         if (isTv) runCatching { webFocusRequester.requestFocus() }
+    }
+
+    /** Show the in-app download chip, or defer it while fullscreen media is active. */
+    fun showDownloadBanner(fileName: String) {
+        val mediaBlocking = playerRequest != null || customView != null
+        if (mediaBlocking) {
+            pendingDownloadBanner = fileName
+            downloadBanner = null
+        } else {
+            downloadBanner = fileName
+            pendingDownloadBanner = null
+        }
+        toastMsg = null
     }
 
     // New tab in front → detections of the old page no longer apply
@@ -873,38 +908,43 @@ fun BrowserScreen(
                 val fileName = android.webkit.URLUtil.guessFileName(
                     url, contentDisposition, mimeType
                 )
-                try {
-                    val request = DownloadManager.Request(Uri.parse(url)).apply {
-                        setMimeType(mimeType)
-                        addRequestHeader("User-Agent", userAgent)
-                        setDescription(ctx.getString(R.string.download_desc, fileName))
-                        setTitle(fileName)
-                        setNotificationVisibility(
-                            DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
-                        )
-                        setDestinationInExternalPublicDir(
-                            Environment.DIRECTORY_DOWNLOADS,
-                            fileName
-                        )
-                        setAllowedOverMetered(true)
-                        setAllowedOverRoaming(true)
+                // WebView may invoke this off the main thread; Compose state must update on main.
+                mainHandler.post {
+                    try {
+                        val request = DownloadManager.Request(Uri.parse(url)).apply {
+                            setMimeType(mimeType)
+                            addRequestHeader("User-Agent", userAgent)
+                            setDescription(ctx.getString(R.string.download_desc, fileName))
+                            setTitle(fileName)
+                            setNotificationVisibility(
+                                DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+                            )
+                            setDestinationInExternalPublicDir(
+                                Environment.DIRECTORY_DOWNLOADS,
+                                fileName
+                            )
+                            setAllowedOverMetered(true)
+                            setAllowedOverRoaming(true)
+                        }
+                        val dm = ctx.getSystemService(DownloadManager::class.java)
+                        val id = dm?.enqueue(request) ?: -1L
+                        val sizeLabel = if (contentLength > 0) {
+                            val mb = contentLength / (1024.0 * 1024.0)
+                            String.format("%.1f MB", mb)
+                        } else "—"
+                        if (id >= 0L) {
+                            onDownload(id, fileName, sizeLabel)
+                            showDownloadBanner(fileName)
+                        }
+                    } catch (e: Exception) {
+                        // Failures only surface when the browser chrome is usable (not over video).
+                        if (playerRequest == null && customView == null) {
+                            toastMsg = ctx.getString(
+                                R.string.msg_download_failed,
+                                e.message ?: ctx.getString(R.string.msg_download_failed_generic)
+                            )
+                        }
                     }
-                    val dm = ctx.getSystemService(DownloadManager::class.java)
-                    val id = dm?.enqueue(request) ?: -1L
-                    val sizeLabel = if (contentLength > 0) {
-                        val mb = contentLength / (1024.0 * 1024.0)
-                        String.format("%.1f MB", mb)
-                    } else "—"
-                    if (id >= 0L) {
-                        onDownload(id, fileName, sizeLabel)
-                        downloadBanner = fileName
-                        toastMsg = null
-                    }
-                } catch (e: Exception) {
-                    toastMsg = ctx.getString(
-                        R.string.msg_download_failed,
-                        e.message ?: ctx.getString(R.string.msg_download_failed_generic)
-                    )
                 }
             }
             fun active() = tab.id == activeTabId
@@ -1268,76 +1308,6 @@ fun BrowserScreen(
             }
 
             
-            // Download toast — D-pad focusable View / dismiss
-            downloadBanner?.let { fileName ->
-                val bannerViewFocus = remember { FocusRequester() }
-                var viewFocused by remember { mutableStateOf(false) }
-                var closeFocused by remember { mutableStateOf(false) }
-                LaunchedEffect(fileName) {
-                    delay(80)
-                    runCatching { bannerViewFocus.requestFocus() }
-                    delay(BrowserConfig.DOWNLOAD_BANNER_MS)
-                    if (downloadBanner == fileName) downloadBanner = null
-                }
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(12.dp)
-                        .fillMaxWidth(0.92f)
-                        .background(DigiColors.BgPanel, RoundedCornerShape(12.dp))
-                        .border(2.dp, DigiColors.Accent, RoundedCornerShape(12.dp))
-                        .padding(horizontal = 10.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        stringResource(R.string.msg_downloading_file, fileName),
-                        color = DigiColors.TextPrimary,
-                        fontSize = 13.sp,
-                        modifier = Modifier.weight(1f),
-                        maxLines = 1
-                    )
-                    Text(
-                        stringResource(R.string.action_view),
-                        color = if (viewFocused) DigiColors.BgDeep else DigiColors.Accent,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier
-                            .focusRequester(bannerViewFocus)
-                            .onFocusChanged { viewFocused = it.isFocused }
-                            .focusable()
-                            .clickable {
-                                downloadBanner = null
-                                onOpenDownloads(liveUrl())
-                            }
-                            .background(
-                                if (viewFocused) DigiColors.Accent else Color.Transparent,
-                                RoundedCornerShape(8.dp)
-                            )
-                            .border(
-                                1.dp,
-                                DigiColors.Accent,
-                                RoundedCornerShape(8.dp)
-                            )
-                            .padding(horizontal = 12.dp, vertical = 8.dp)
-                    )
-                    Spacer(Modifier.size(8.dp))
-                    Text(
-                        "✕",
-                        color = if (closeFocused) DigiColors.BgDeep else DigiColors.TextMuted,
-                        fontSize = 14.sp,
-                        modifier = Modifier
-                            .onFocusChanged { closeFocused = it.isFocused }
-                            .focusable()
-                            .clickable { downloadBanner = null }
-                            .background(
-                                if (closeFocused) DigiColors.Accent else Color.Transparent,
-                                RoundedCornerShape(8.dp)
-                            )
-                            .padding(horizontal = 12.dp, vertical = 8.dp)
-                    )
-                }
-            }
-
             if (isTv && cursorVisible && boxW > 0 && !chromeVisible) {
                 val cursorAlpha = if (imeVisible) 0f else 1f
                 Canvas(modifier = Modifier.fillMaxSize()) {
@@ -1352,12 +1322,38 @@ fun BrowserScreen(
 
         }
 
+        // Toasts live outside the focusable Web area so D-pad OK is not eaten by cursor clickAtCursor().
+        // Download toast — same level as StreamPrompt.
+        if (playerRequest == null && customView == null && !chromeVisible) {
+            downloadBanner?.let { fileName ->
+                DownloadToast(
+                    fileName = fileName,
+                    onView = {
+                        val url = liveUrl()
+                        downloadBanner = null
+                        pendingDownloadBanner = null
+                        onOpenDownloads(url)
+                    },
+                    onDismiss = {
+                        downloadBanner = null
+                        pendingDownloadBanner = null
+                        if (isTv) runCatching { webFocusRequester.requestFocus() }
+                    },
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                )
+            }
+        }
+
         // ===== "Video detected" prompt =====
         if (streamPromptVisible) {
             StreamPrompt(
                 streams = rankedStreams,
                 onPlayInApp = { openPlayer(it) },
                 onPlayInBrowser = {
+                    streamPromptDismissed = true
+                    if (isTv) runCatching { webFocusRequester.requestFocus() }
+                },
+                onDismiss = {
                     streamPromptDismissed = true
                     if (isTv) runCatching { webFocusRequester.requestFocus() }
                 },
@@ -1902,7 +1898,14 @@ fun BrowserScreen(
             view = view,
             webView = webView,
             callback = customViewCallback,
-            onExit = { customView = null; customViewCallback = null }
+            onExit = {
+                customView = null
+                customViewCallback = null
+                pendingDownloadBanner?.let {
+                    downloadBanner = it
+                    pendingDownloadBanner = null
+                }
+            }
         )
     }
 
