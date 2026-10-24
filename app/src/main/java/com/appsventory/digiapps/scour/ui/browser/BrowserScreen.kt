@@ -138,6 +138,7 @@ import com.appsventory.digiapps.scour.data.isRealUrl
 import com.appsventory.digiapps.scour.data.Prefs
 import com.appsventory.digiapps.scour.data.PrivateDnsProvider
 import com.appsventory.digiapps.scour.data.TabThumbs
+import com.appsventory.digiapps.scour.ui.downloads.DownloadActions
 import com.appsventory.digiapps.scour.ui.shell.MenuItem
 import com.appsventory.digiapps.scour.data.SearchEngine
 import com.appsventory.digiapps.scour.data.UserAgentPreset
@@ -182,6 +183,8 @@ fun BrowserScreen(
     onOpenBookmarks: (currentUrl: String) -> Unit = {},
     onHistoryVisit: (title: String, url: String) -> Unit = { _, _ -> },
     onDownload: (id: Long, name: String, sizeLabel: String) -> Unit = { _, _, _ -> },
+    /** Names already in the downloads list (for same-name conflict checks). */
+    knownDownloadNames: Set<String> = emptySet(),
     searchEngine: SearchEngine = SearchEngine.Google,
     privateDns: PrivateDnsProvider = PrivateDnsProvider.Off,
     modifier: Modifier = Modifier
@@ -230,6 +233,8 @@ fun BrowserScreen(
     var downloadBanner by remember { mutableStateOf<String?>(null) }
     /** Queued while player/fullscreen is active so the chip can appear after exit. */
     var pendingDownloadBanner by remember { mutableStateOf<String?>(null) }
+    /** Same-name conflict awaiting Cancel / Download anyway. */
+    var downloadConflict by remember { mutableStateOf<PendingDownloadRequest?>(null) }
 
     // ---- Native video player: streams seen on the current page (reactive) ----
     var detectedStreams by remember { mutableStateOf<List<DetectedStream>>(emptyList()) }
@@ -733,6 +738,11 @@ fun BrowserScreen(
                 streamPromptDismissed = true
                 if (isTv) runCatching { webFocusRequester.requestFocus() }
             }
+            // Same-name download conflict toast.
+            downloadConflict != null -> {
+                downloadConflict = null
+                if (isTv) runCatching { webFocusRequester.requestFocus() }
+            }
             // Download toast: same idea — dismiss before chrome.
             downloadBanner != null -> {
                 downloadBanner = null
@@ -838,6 +848,41 @@ fun BrowserScreen(
         toastMsg = null
     }
 
+    /** Enqueue via DownloadManager using [fileName] for both the DM destination and list entry. */
+    fun enqueueDownload(req: PendingDownloadRequest, fileName: String) {
+        try {
+            val request = DownloadManager.Request(Uri.parse(req.url)).apply {
+                setMimeType(req.mimeType)
+                addRequestHeader("User-Agent", req.userAgent)
+                setDescription(context.getString(R.string.download_desc, fileName))
+                setTitle(fileName)
+                setNotificationVisibility(
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+                )
+                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                setAllowedOverMetered(true)
+                setAllowedOverRoaming(true)
+            }
+            val dm = context.getSystemService(DownloadManager::class.java)
+            val id = dm?.enqueue(request) ?: -1L
+            val sizeLabel = if (req.contentLength > 0) {
+                val mb = req.contentLength / (1024.0 * 1024.0)
+                String.format("%.1f MB", mb)
+            } else "—"
+            if (id >= 0L) {
+                onDownload(id, fileName, sizeLabel)
+                showDownloadBanner(fileName)
+            }
+        } catch (e: Exception) {
+            if (playerRequest == null && customView == null) {
+                toastMsg = context.getString(
+                    R.string.msg_download_failed,
+                    e.message ?: context.getString(R.string.msg_download_failed_generic)
+                )
+            }
+        }
+    }
+
     // New tab in front → detections of the old page no longer apply
     LaunchedEffect(activeTabId) {
         resetDetection()
@@ -905,45 +950,26 @@ fun BrowserScreen(
                 )
             }
             setDownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
-                val fileName = android.webkit.URLUtil.guessFileName(
+                val guessed = android.webkit.URLUtil.guessFileName(
                     url, contentDisposition, mimeType
                 )
                 // WebView may invoke this off the main thread; Compose state must update on main.
                 mainHandler.post {
-                    try {
-                        val request = DownloadManager.Request(Uri.parse(url)).apply {
-                            setMimeType(mimeType)
-                            addRequestHeader("User-Agent", userAgent)
-                            setDescription(ctx.getString(R.string.download_desc, fileName))
-                            setTitle(fileName)
-                            setNotificationVisibility(
-                                DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
-                            )
-                            setDestinationInExternalPublicDir(
-                                Environment.DIRECTORY_DOWNLOADS,
-                                fileName
-                            )
-                            setAllowedOverMetered(true)
-                            setAllowedOverRoaming(true)
-                        }
-                        val dm = ctx.getSystemService(DownloadManager::class.java)
-                        val id = dm?.enqueue(request) ?: -1L
-                        val sizeLabel = if (contentLength > 0) {
-                            val mb = contentLength / (1024.0 * 1024.0)
-                            String.format("%.1f MB", mb)
-                        } else "—"
-                        if (id >= 0L) {
-                            onDownload(id, fileName, sizeLabel)
-                            showDownloadBanner(fileName)
-                        }
-                    } catch (e: Exception) {
-                        // Failures only surface when the browser chrome is usable (not over video).
-                        if (playerRequest == null && customView == null) {
-                            toastMsg = ctx.getString(
-                                R.string.msg_download_failed,
-                                e.message ?: ctx.getString(R.string.msg_download_failed_generic)
-                            )
-                        }
+                    val pending = PendingDownloadRequest(
+                        url = url,
+                        userAgent = userAgent.orEmpty(),
+                        contentDisposition = contentDisposition,
+                        mimeType = mimeType,
+                        contentLength = contentLength,
+                        suggestedName = guessed
+                    )
+                    val conflict = DownloadActions.localFileExists(guessed) ||
+                        guessed in knownDownloadNames
+                    if (conflict) {
+                        downloadConflict = pending
+                        downloadBanner = null
+                    } else {
+                        enqueueDownload(pending, guessed)
                     }
                 }
             }
@@ -1323,9 +1349,27 @@ fun BrowserScreen(
         }
 
         // Toasts live outside the focusable Web area so D-pad OK is not eaten by cursor clickAtCursor().
-        // Download toast — same level as StreamPrompt.
         if (playerRequest == null && customView == null && !chromeVisible) {
-            downloadBanner?.let { fileName ->
+            downloadConflict?.let { pending ->
+                DownloadConflictToast(
+                    fileName = pending.suggestedName,
+                    onCancel = {
+                        downloadConflict = null
+                        if (isTv) runCatching { webFocusRequester.requestFocus() }
+                    },
+                    onDownloadAnyway = {
+                        val reserved = knownDownloadNames +
+                            (downloadBanner?.let { setOf(it) } ?: emptySet())
+                        val unique = DownloadActions.uniqueFileName(
+                            pending.suggestedName,
+                            reserved
+                        )
+                        downloadConflict = null
+                        enqueueDownload(pending, unique)
+                    },
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                )
+            } ?: downloadBanner?.let { fileName ->
                 DownloadToast(
                     fileName = fileName,
                     onView = {
@@ -2411,3 +2455,13 @@ fun TabSwitcherOverlay(
         }
     }
 }
+
+/** Held while the user resolves a same-name download conflict. */
+private data class PendingDownloadRequest(
+    val url: String,
+    val userAgent: String,
+    val contentDisposition: String?,
+    val mimeType: String?,
+    val contentLength: Long,
+    val suggestedName: String
+)

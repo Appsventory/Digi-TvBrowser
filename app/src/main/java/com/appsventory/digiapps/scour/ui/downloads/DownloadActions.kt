@@ -74,16 +74,45 @@ object DownloadActions {
         }
     }
 
+    /**
+     * Deletes only the file tied to this list entry.
+     * Prefer DownloadManager ID so system-renamed files (e.g. file-1.apk) are targeted;
+     * never scans the whole Downloads folder.
+     */
     fun deleteFromDisk(context: Context, item: DownloadItem): Boolean {
         val dm = context.getSystemService(DownloadManager::class.java)
-        if (item.id > 0L) {
-            runCatching { dm?.remove(item.id) }
+        if (item.id > 0L && dm != null) {
+            // remove(id) deletes that download record and its local file only.
+            val removed = runCatching { dm.remove(item.id) }.getOrDefault(0)
+            if (removed > 0) return true
         }
-        val file = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-            item.name
-        )
+        // Fallback when we never got a DM id: exact name in public Downloads only.
+        val file = downloadsDirFile(item.name)
         return runCatching { if (file.exists()) file.delete() else true }.getOrDefault(false)
+    }
+
+    fun downloadsDirFile(name: String): File =
+        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), name)
+
+    /** True if a file with this exact name already exists in public Downloads. */
+    fun localFileExists(name: String): Boolean = downloadsDirFile(name).exists()
+
+    /**
+     * Picks a free name: `file.ext` → `file-1.ext`, `file-2.ext`, …
+     * Skips names that exist on disk or are in [reservedNames] (current list).
+     */
+    fun uniqueFileName(desired: String, reservedNames: Set<String> = emptySet()): String {
+        if (!localFileExists(desired) && desired !in reservedNames) return desired
+        val dot = desired.lastIndexOf('.')
+        val base = if (dot > 0) desired.substring(0, dot) else desired
+        val ext = if (dot > 0) desired.substring(dot) else ""
+        var n = 1
+        while (n < 10_000) {
+            val candidate = "$base-$n$ext"
+            if (!localFileExists(candidate) && candidate !in reservedNames) return candidate
+            n++
+        }
+        return "$base-${System.currentTimeMillis()}$ext"
     }
 
     fun isApk(name: String): Boolean =

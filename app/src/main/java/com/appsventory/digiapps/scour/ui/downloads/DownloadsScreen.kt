@@ -4,7 +4,9 @@ import android.view.ViewConfiguration
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +23,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.InsertDriveFile
 import androidx.compose.material3.Icon
@@ -35,18 +38,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.appsventory.digiapps.scour.R
 import com.appsventory.digiapps.scour.data.DownloadStatus
 import com.appsventory.digiapps.scour.ui.shell.ClearButton
 import com.appsventory.digiapps.scour.ui.shell.EmptyState
@@ -54,8 +61,6 @@ import com.appsventory.digiapps.scour.ui.shell.MenuItem
 import com.appsventory.digiapps.scour.ui.shell.contentEnterFocus
 import com.appsventory.digiapps.scour.ui.theme.DigiColors
 import kotlinx.coroutines.delay
-import androidx.compose.ui.res.stringResource
-import com.appsventory.digiapps.scour.R
 
 data class DownloadItem(
     val id: Long = 0L,
@@ -68,13 +73,15 @@ data class DownloadItem(
 @Composable
 fun DownloadsScreen(
     items: List<DownloadItem>,
-    onClear: () -> Unit,
+    /** [deleteFiles] true → also remove files from storage via DownloadManager / disk. */
+    onClear: (deleteFiles: Boolean) -> Unit,
     onRemove: (DownloadItem, deleteFile: Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     var menuItem by remember { mutableStateOf<DownloadItem?>(null) }
     var toast by remember { mutableStateOf<String?>(null) }
+    var showClearDialog by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -100,7 +107,7 @@ fun DownloadsScreen(
                 )
             }
             if (items.isNotEmpty()) {
-                ClearButton(onClick = onClear)
+                ClearButton(onClick = { showClearDialog = true })
             }
         }
 
@@ -162,12 +169,195 @@ fun DownloadsScreen(
         )
     }
 
+    if (showClearDialog) {
+        ClearDownloadsDialog(
+            onDismiss = { showClearDialog = false },
+            onConfirm = { deleteFiles ->
+                showClearDialog = false
+                onClear(deleteFiles)
+            }
+        )
+    }
+
     toast?.let { msg ->
         LaunchedEffect(msg) {
             delay(2000)
             toast = null
         }
     }
+}
+
+/** Confirm clear: optional checkbox to also delete local files. TV/D-pad friendly. */
+@Composable
+private fun ClearDownloadsDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (deleteFiles: Boolean) -> Unit
+) {
+    var deleteFiles by remember { mutableStateOf(false) }
+    val cancelFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        delay(80)
+        runCatching { cancelFocus.requestFocus() }
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .widthIn(max = 420.dp)
+                .fillMaxWidth()
+                .background(DigiColors.BgCard, RoundedCornerShape(18.dp))
+                .border(1.5.dp, DigiColors.Border, RoundedCornerShape(18.dp))
+                .padding(20.dp)
+        ) {
+            Text(
+                stringResource(R.string.downloads_clear_title),
+                color = DigiColors.TextPrimary,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                stringResource(R.string.downloads_clear_body),
+                color = DigiColors.TextMuted,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+
+            ClearDialogCheckbox(
+                checked = deleteFiles,
+                label = stringResource(R.string.downloads_clear_delete_files),
+                onToggle = { deleteFiles = !deleteFiles },
+                modifier = Modifier.padding(top = 18.dp)
+            )
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)
+            ) {
+                ClearDialogButton(
+                    label = stringResource(R.string.downloads_clear_cancel),
+                    primary = false,
+                    onClick = onDismiss,
+                    focusRequester = cancelFocus
+                )
+                ClearDialogButton(
+                    label = stringResource(R.string.downloads_clear_confirm),
+                    primary = true,
+                    onClick = { onConfirm(deleteFiles) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ClearDialogCheckbox(
+    checked: Boolean,
+    label: String,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var focused by remember { mutableStateOf(false) }
+    val interaction = remember { MutableInteractionSource() }
+    val shape = RoundedCornerShape(12.dp)
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .onFocusChanged { focused = it.isFocused }
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = onToggle
+            )
+            .background(
+                if (focused) DigiColors.AccentDim else DigiColors.BgSelected,
+                shape
+            )
+            .border(
+                1.5.dp,
+                if (focused) DigiColors.FocusRing else DigiColors.Border,
+                shape
+            )
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(22.dp)
+                .background(
+                    if (checked) DigiColors.Accent else Color.Transparent,
+                    RoundedCornerShape(6.dp)
+                )
+                .border(
+                    1.5.dp,
+                    if (checked) DigiColors.Accent else DigiColors.BorderMuted,
+                    RoundedCornerShape(6.dp)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            if (checked) {
+                Icon(
+                    Icons.Outlined.Check,
+                    contentDescription = null,
+                    tint = DigiColors.BgDeep,
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+        }
+        Text(
+            label,
+            color = DigiColors.TextPrimary,
+            fontSize = 14.sp,
+            modifier = Modifier.padding(start = 12.dp)
+        )
+    }
+}
+
+@Composable
+private fun ClearDialogButton(
+    label: String,
+    primary: Boolean,
+    onClick: () -> Unit,
+    focusRequester: FocusRequester? = null
+) {
+    var focused by remember { mutableStateOf(false) }
+    val interaction = remember { MutableInteractionSource() }
+    val shape = RoundedCornerShape(12.dp)
+    val bg = when {
+        focused -> DigiColors.Accent
+        primary -> DigiColors.Accent.copy(alpha = 0.18f)
+        else -> Color.Transparent
+    }
+    val border = when {
+        focused -> DigiColors.Accent
+        primary -> DigiColors.Accent.copy(alpha = 0.7f)
+        else -> DigiColors.BorderMuted
+    }
+    val fg = when {
+        focused -> DigiColors.BgDeep
+        primary -> DigiColors.Accent
+        else -> DigiColors.TextSecondary
+    }
+
+    Text(
+        text = label,
+        color = fg,
+        fontSize = 14.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .onFocusChanged { focused = it.isFocused }
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = onClick
+            )
+            .background(bg, shape)
+            .border(1.5.dp, border, shape)
+            .padding(horizontal = 18.dp, vertical = 12.dp)
+    )
 }
 
 @OptIn(ExperimentalFoundationApi::class)

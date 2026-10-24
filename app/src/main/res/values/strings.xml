@@ -24,6 +24,11 @@
     <string name="downloads_count">%1$d files</string>
     <string name="downloads_empty_title">No downloads</string>
     <string name="downloads_empty_body">Files you download will appear here.</string>
+    <string name="downloads_clear_title">Clear downloads?</string>
+    <string name="downloads_clear_body">This removes entries from the downloads list.</string>
+    <string name="downloads_clear_delete_files">Also delete files from device storage</string>
+    <string name="downloads_clear_confirm">Clear</string>
+    <string name="downloads_clear_cancel">Cancel</string>
     <string name="download_cant_open">Can\'t open file</string>
     <string name="download_done_install">Done · tap to install</string>
     <string name="download_done">Done</string>
@@ -90,6 +95,10 @@
     <string name="msg_download_failed_generic">error</string>
     <string name="msg_downloading_file">Downloading: %1$s</string>
     <string name="toast_download_title">Download started</string>
+    <string name="toast_download_exists_title">File already exists</string>
+    <string name="toast_download_exists_body">“%1$s” is already on this device or in your downloads list.</string>
+    <string name="toast_download_anyway">Download anyway</string>
+    <string name="toast_download_cancel">Cancel</string>
     <string name="download_desc">Downloading %1$s</string>
     <string name="panel_secure">Secure</string>
     <string name="panel_http">HTTP</string>

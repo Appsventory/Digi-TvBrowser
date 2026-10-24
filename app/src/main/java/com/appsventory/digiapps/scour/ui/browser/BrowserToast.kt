@@ -233,6 +233,62 @@ fun DownloadToast(
     }
 }
 
+/** Same-name conflict: Cancel or Download anyway (unique renamed file). */
+@Composable
+fun DownloadConflictToast(
+    fileName: String,
+    onCancel: () -> Unit,
+    onDownloadAnyway: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val primaryFocus = remember { FocusRequester() }
+    LaunchedEffect(fileName) {
+        delay(FOCUS_DELAY_MS)
+        runCatching { primaryFocus.requestFocus() }
+    }
+
+    BrowserToastCard(modifier = modifier) {
+        Row(
+            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            ToastIconBadge(Icons.Outlined.Download)
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    stringResource(R.string.toast_download_exists_title),
+                    color = DigiColors.TextPrimary,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    stringResource(R.string.toast_download_exists_body, fileName),
+                    color = DigiColors.TextMuted,
+                    fontSize = 12.sp,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+                Row(
+                    modifier = Modifier.padding(top = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ToastAction(
+                        label = stringResource(R.string.toast_download_cancel),
+                        onClick = onCancel,
+                        focusRequester = primaryFocus
+                    )
+                    ToastAction(
+                        label = stringResource(R.string.toast_download_anyway),
+                        onClick = onDownloadAnyway,
+                        primary = true
+                    )
+                }
+            }
+            ToastDismiss(onClick = onCancel)
+        }
+    }
+}
+
 /**
  * Video detected card — redesigned on the same toast language as [DownloadToast].
  * Non-modal; page stays usable until the user answers.

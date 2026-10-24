@@ -40,6 +40,7 @@ import com.appsventory.digiapps.scour.player.PlayerPip
 import com.appsventory.digiapps.scour.ui.bookmarks.BookmarksScreen
 import com.appsventory.digiapps.scour.ui.browser.BrowserScreen
 import com.appsventory.digiapps.scour.ui.browser.TabSwitcherOverlay
+import com.appsventory.digiapps.scour.ui.downloads.DownloadActions
 import com.appsventory.digiapps.scour.ui.downloads.DownloadItem
 import com.appsventory.digiapps.scour.ui.downloads.DownloadsScreen
 import com.appsventory.digiapps.scour.ui.history.HistoryItem
@@ -361,7 +362,8 @@ private fun DigiBrowserApp() {
                 tab = AppTab.Bookmarks
             },
             onHistoryVisit = { title, url -> recordHistory(title, url) },
-            onDownload = { id, name, sizeLabel -> addDownload(id, name, sizeLabel) }
+            onDownload = { id, name, sizeLabel -> addDownload(id, name, sizeLabel) },
+            knownDownloadNames = downloads.map { it.name }.toSet()
         )
         return
     }
@@ -413,13 +415,25 @@ private fun DigiBrowserApp() {
             )
             AppTab.Downloads -> DownloadsScreen(
                 items = downloads,
-                onClear = {
+                onClear = { deleteFiles ->
+                    // Snapshot current list only — never touch files removed from the list earlier.
+                    val snapshot = downloads.toList()
+                    if (deleteFiles) {
+                        snapshot.forEach { item ->
+                            DownloadActions.deleteFromDisk(context, item)
+                        }
+                    }
                     downloads = emptyList()
                     persistDownloads(emptyList())
                 },
-                onRemove = { item, _ ->
+                onRemove = { item, deleteFile ->
+                    if (deleteFile) {
+                        DownloadActions.deleteFromDisk(context, item)
+                    }
                     val next = downloads.filterNot {
-                        it.id == item.id && it.name == item.name
+                        // Match by id when known; id+name otherwise (legacy rows).
+                        if (item.id > 0L) it.id == item.id
+                        else it.id == item.id && it.name == item.name
                     }
                     downloads = next
                     persistDownloads(next)
