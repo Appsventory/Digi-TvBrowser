@@ -34,6 +34,49 @@ enum class PrivateDnsProvider(
     }
 }
 
+/** User-Agent selection mode. Default uses the WebView engine's real default string. */
+/**
+ * Browser-specific User-Agent presets.
+ *
+ * Each non-Default preset maps to an explicit, centralized UA string in [UserAgents].
+ * Default always restores the WebView engine's real default via
+ * [android.webkit.WebSettings.getDefaultUserAgent].
+ *
+ * These strings influence website browser detection only. They do not change the
+ * underlying Chromium/WebView engine, Client Hints, navigator.userAgentData,
+ * rendering behavior, or platform capabilities.
+ */
+enum class UserAgentPreset(
+    val id: String,
+    val brand: String,
+    val label: String
+) {
+    Default("default", "Default", "Default"),
+    ChromeDesktop("chrome_desktop", "Google Chrome", "Chrome Desktop"),
+    ChromeTablet("chrome_tablet", "Google Chrome", "Chrome Tablet"),
+    ChromeMobile("chrome_mobile", "Google Chrome", "Chrome Mobile"),
+    FirefoxDesktop("firefox_desktop", "Mozilla Firefox", "Firefox Desktop"),
+    FirefoxTablet("firefox_tablet", "Mozilla Firefox", "Firefox Tablet"),
+    FirefoxMobile("firefox_mobile", "Mozilla Firefox", "Firefox Mobile"),
+    EdgeDesktop("edge_desktop", "Microsoft Edge", "Edge Desktop"),
+    SafariDesktop("safari_desktop", "Apple Safari", "Safari Desktop"),
+    AppleTv("apple_tv", "Apple TV", "Apple TV Browser");
+
+    companion object {
+        fun fromId(id: String): UserAgentPreset =
+            entries.find { it.id == id } ?: Default
+
+        /** Brand groups for UI presentation (Default is standalone). */
+        val brandGroups: List<Pair<String, List<UserAgentPreset>>> = listOf(
+            "Google Chrome" to listOf(ChromeDesktop, ChromeTablet, ChromeMobile),
+            "Mozilla Firefox" to listOf(FirefoxDesktop, FirefoxTablet, FirefoxMobile),
+            "Microsoft Edge" to listOf(EdgeDesktop),
+            "Apple Safari" to listOf(SafariDesktop),
+            "Apple TV" to listOf(AppleTv)
+        )
+    }
+}
+
 data class BookmarkEntry(
     val title: String,
     val url: String,
@@ -67,6 +110,8 @@ object Prefs {
     private const val NAME = "digi_browser_prefs"
     private const val KEY_ENGINE = "search_engine"
     private const val KEY_DESKTOP = "desktop_mode"
+    private const val KEY_UA_PRESET = "ua_preset"
+    private const val KEY_UA_MODE = "ua_mode" // legacy key, migrated once
     private const val KEY_BOOKMARKS = "bookmarks_json"
     private const val KEY_SHORTCUTS = "shortcuts_json"
     private const val KEY_HISTORY = "history_json"
@@ -81,6 +126,7 @@ object Prefs {
     private const val KEY_SAVE_HISTORY = "save_history"
     private const val KEY_PRIVATE_DNS = "private_dns"
     private const val KEY_VIDEO_RESUME = "video_resume_json"
+    private const val KEY_CURSOR_HOLD_SPEED = "cursor_hold_speed"
     private const val MAX_HISTORY = 200
     private const val MAX_DOWNLOADS = 100
     private const val MAX_VIDEO_RESUME = 100
@@ -98,12 +144,55 @@ object Prefs {
         prefs(context).edit().putString(KEY_ENGINE, engine.id).apply()
     }
 
-    fun isDesktopMode(context: Context): Boolean =
-        prefs(context).getBoolean(KEY_DESKTOP, false)
-
-    fun setDesktopMode(context: Context, enabled: Boolean) {
-        prefs(context).edit().putBoolean(KEY_DESKTOP, enabled).apply()
+    /** Legacy helper — true when a desktop-oriented preset is active. */
+    fun isDesktopMode(context: Context): Boolean {
+        val p = getUserAgentPreset(context)
+        return p == UserAgentPreset.ChromeDesktop ||
+            p == UserAgentPreset.FirefoxDesktop ||
+            p == UserAgentPreset.EdgeDesktop ||
+            p == UserAgentPreset.SafariDesktop
     }
+
+    fun getUserAgentPreset(context: Context): UserAgentPreset {
+        val p = prefs(context)
+        val stored = p.getString(KEY_UA_PRESET, null)
+        if (stored != null) return UserAgentPreset.fromId(stored)
+
+        // Migrate from previous generic ua_mode values
+        when (p.getString(KEY_UA_MODE, null)) {
+            "desktop" -> return UserAgentPreset.ChromeDesktop
+            "mobile" -> return UserAgentPreset.ChromeMobile
+            "default", "custom" -> return UserAgentPreset.Default
+        }
+        // Migrate from original desktop_mode boolean
+        return if (p.getBoolean(KEY_DESKTOP, false)) {
+            UserAgentPreset.ChromeDesktop
+        } else {
+            UserAgentPreset.Default
+        }
+    }
+
+    fun setUserAgentPreset(context: Context, preset: UserAgentPreset) {
+        prefs(context).edit()
+            .putString(KEY_UA_PRESET, preset.id)
+            .putBoolean(KEY_DESKTOP, isDesktopOriented(preset))
+            .apply()
+    }
+
+    private fun isDesktopOriented(preset: UserAgentPreset): Boolean =
+        preset == UserAgentPreset.ChromeDesktop ||
+            preset == UserAgentPreset.FirefoxDesktop ||
+            preset == UserAgentPreset.EdgeDesktop ||
+            preset == UserAgentPreset.SafariDesktop
+
+    /**
+     * Resolves the effective User-Agent string for the given preset.
+     * Default always uses the WebView engine's real default (never invented).
+     */
+    fun resolveUserAgent(
+        context: Context,
+        preset: UserAgentPreset = getUserAgentPreset(context)
+    ): String = UserAgents.forPreset(context, preset)
 
     // —— Bookmarks ——
     fun getBookmarks(context: Context): List<BookmarkEntry> {
@@ -399,15 +488,121 @@ object Prefs {
     fun setPrivateDns(context: Context, provider: PrivateDnsProvider) {
         prefs(context).edit().putString(KEY_PRIVATE_DNS, provider.id).apply()
     }
+
+    /**
+     * Long-press cursor speed multiplier (1×–10×).
+     * Applies only to continuous hold movement; single-press step is unchanged.
+     * Invalid or missing values fall back to [BrowserConfig.CURSOR_HOLD_SPEED_DEFAULT].
+     */
+    fun getCursorHoldSpeed(context: Context): Float {
+        val raw = prefs(context).getFloat(
+            KEY_CURSOR_HOLD_SPEED,
+            BrowserConfig.CURSOR_HOLD_SPEED_DEFAULT
+        )
+        return if (raw in BrowserConfig.CURSOR_HOLD_SPEED_MIN..BrowserConfig.CURSOR_HOLD_SPEED_MAX) {
+            // Snap to whole steps for a stable UI (1×, 2×, … 10×)
+            raw.toInt().toFloat().coerceIn(
+                BrowserConfig.CURSOR_HOLD_SPEED_MIN,
+                BrowserConfig.CURSOR_HOLD_SPEED_MAX
+            )
+        } else {
+            BrowserConfig.CURSOR_HOLD_SPEED_DEFAULT
+        }
+    }
+
+    fun setCursorHoldSpeed(context: Context, multiplier: Float) {
+        val value = multiplier
+            .toInt()
+            .toFloat()
+            .coerceIn(BrowserConfig.CURSOR_HOLD_SPEED_MIN, BrowserConfig.CURSOR_HOLD_SPEED_MAX)
+        prefs(context).edit().putFloat(KEY_CURSOR_HOLD_SPEED, value).apply()
+    }
 }
 
 
+/**
+ * Centralized User-Agent profiles for [UserAgentPreset].
+ *
+ * Strings are plausible, widely-recognized patterns for each browser family and
+ * form factor. They are not claimed to be the absolute latest release of any
+ * browser. DigiBrowser remains powered by Android WebView (Chromium); changing
+ * the UA string does not change Client Hints, navigator.userAgentData, or the
+ * rendering engine.
+ *
+ * Sources / assumptions:
+ * - Chrome / Edge: standard Chromium desktop & Android form-factor patterns.
+ * - Firefox: standard Gecko desktop & Android form-factor patterns.
+ * - Safari Desktop: standard macOS Safari WebKit pattern.
+ * - Apple TV: Apple TV / tvOS WebKit-style pattern. Exact current tvOS UA is not
+ *   published as a stable public contract; this is a documented, defensible
+ *   approximation — not a verified live Apple TV browser string.
+ */
 object UserAgents {
+    /** Fallback used only if WebSettings.getDefaultUserAgent is unavailable. */
     const val MOBILE =
         "Mozilla/5.0 (Linux; Android 13; TV) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-    const val DESKTOP =
+    const val CHROME_DESKTOP =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+    const val CHROME_TABLET =
+        "Mozilla/5.0 (Linux; Android 13; Pixel Tablet) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+    const val CHROME_MOBILE =
+        "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+
+    const val FIREFOX_DESKTOP =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0"
+
+    const val FIREFOX_TABLET =
+        "Mozilla/5.0 (Android 13; Tablet; rv:121.0) Gecko/121.0 Firefox/121.0"
+
+    const val FIREFOX_MOBILE =
+        "Mozilla/5.0 (Android 13; Mobile; rv:121.0) Gecko/121.0 Firefox/121.0"
+
+    const val EDGE_DESKTOP =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"
+
+    const val SAFARI_DESKTOP =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 " +
+            "(KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+
+    /**
+     * Apple TV / tvOS WebKit-style UA.
+     * Note: Apple does not publish a stable public contract for the current
+     * Apple TV browser UA. This is a defensible approximation based on known
+     * tvOS WebKit patterns, not a verified live device string.
+     */
+    const val APPLE_TV =
+        "Mozilla/5.0 (Apple TV; CPU iPhone OS 17_0 like Mac OS X) " +
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+
+    /** Legacy alias kept for other modules that still reference DESKTOP. */
+    const val DESKTOP = CHROME_DESKTOP
+
+    fun defaultOf(context: android.content.Context): String {
+        return runCatching {
+            android.webkit.WebSettings.getDefaultUserAgent(context)
+        }.getOrDefault(MOBILE)
+    }
+
+    fun forPreset(context: android.content.Context, preset: UserAgentPreset): String {
+        return when (preset) {
+            UserAgentPreset.Default -> defaultOf(context)
+            UserAgentPreset.ChromeDesktop -> CHROME_DESKTOP
+            UserAgentPreset.ChromeTablet -> CHROME_TABLET
+            UserAgentPreset.ChromeMobile -> CHROME_MOBILE
+            UserAgentPreset.FirefoxDesktop -> FIREFOX_DESKTOP
+            UserAgentPreset.FirefoxTablet -> FIREFOX_TABLET
+            UserAgentPreset.FirefoxMobile -> FIREFOX_MOBILE
+            UserAgentPreset.EdgeDesktop -> EDGE_DESKTOP
+            UserAgentPreset.SafariDesktop -> SAFARI_DESKTOP
+            UserAgentPreset.AppleTv -> APPLE_TV
+        }
+    }
 }

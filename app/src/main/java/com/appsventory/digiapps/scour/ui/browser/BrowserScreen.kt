@@ -58,6 +58,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
@@ -80,11 +81,13 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.PlayCircle
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -137,7 +140,7 @@ import com.appsventory.digiapps.scour.data.PrivateDnsProvider
 import com.appsventory.digiapps.scour.data.TabThumbs
 import com.appsventory.digiapps.scour.ui.shell.MenuItem
 import com.appsventory.digiapps.scour.data.SearchEngine
-import com.appsventory.digiapps.scour.data.UserAgents
+import com.appsventory.digiapps.scour.data.UserAgentPreset
 import com.appsventory.digiapps.scour.player.DetectedStream
 import com.appsventory.digiapps.scour.player.DetectedSubtitle
 import com.appsventory.digiapps.scour.player.ManifestProbe
@@ -219,7 +222,8 @@ fun BrowserScreen(
     val tabThumbs = TabThumbs.map
 
 
-    var desktopMode by remember { mutableStateOf(Prefs.isDesktopMode(context)) }
+    var uaPreset by remember { mutableStateOf(Prefs.getUserAgentPreset(context)) }
+    var uaMenuOpen by remember { mutableStateOf(false) }
     var isBookmarked by remember { mutableStateOf(Prefs.isBookmarked(context, initialUrl)) }
     var toastMsg by remember { mutableStateOf<String?>(null) }
     var downloadBanner by remember { mutableStateOf<String?>(null) }
@@ -570,13 +574,22 @@ fun BrowserScreen(
         hideChrome()
     }
 
-    fun toggleDesktop() {
-        desktopMode = !desktopMode
-        Prefs.setDesktopMode(context, desktopMode)
-        webView?.settings?.userAgentString =
-            if (desktopMode) UserAgents.DESKTOP else UserAgents.MOBILE
-        webView?.reload()
-        toastMsg = context.getString(if (desktopMode) R.string.msg_desktop_on else R.string.msg_mobile_on)
+    fun applyUserAgent(preset: UserAgentPreset, reload: Boolean = true) {
+        uaPreset = preset
+        Prefs.setUserAgentPreset(context, preset)
+        val ua = Prefs.resolveUserAgent(context, preset)
+        // Apply to the live WebView and every pooled instance so new navigations use it.
+        webView?.settings?.userAgentString = ua
+        pool.values.forEach { it.settings.userAgentString = ua }
+        if (reload) {
+            webView?.reload()
+        }
+        toastMsg = if (preset == UserAgentPreset.Default) {
+            context.getString(R.string.msg_ua_default)
+        } else {
+            context.getString(R.string.msg_ua_preset, preset.label)
+        }
+        uaMenuOpen = false
     }
 
     fun showSecurityToast() {
@@ -621,19 +634,30 @@ fun BrowserScreen(
     }
 
     // Progressive cursor acceleration while a D-pad direction is held.
+    // Single-press distance is unchanged (CURSOR_STEP_PX). Continuous movement
+    // ramps from baseline (1×) to baseline × holdSpeed multiplier.
     // Stops immediately when dirX/dirY clear (key release, click, chrome open, dispose).
+    // Native key-repeats are ignored; this frame loop owns sustained movement.
     LaunchedEffect(dirX, dirY) {
         if (dirX == 0f && dirY == 0f) return@LaunchedEffect
         val startedAt = holdStartMs
+        // Snapshot multiplier at hold start so mid-hold setting changes do not jerk speed.
+        val holdMult = Prefs.getCursorHoldSpeed(context)
+            .coerceIn(BrowserConfig.CURSOR_HOLD_SPEED_MIN, BrowserConfig.CURSOR_HOLD_SPEED_MAX)
+        val base = BrowserConfig.CURSOR_BASE_SPEED_PX_S
+        val maxSpeed = base * holdMult
         var lastNanos = withFrameNanos { it }
         while (dirX != 0f || dirY != 0f) {
             val now = withFrameNanos { it }
             val dt = ((now - lastNanos) / 1_000_000_000f).coerceIn(0f, 0.05f)
             lastNanos = now
             val heldFor = (SystemClock.uptimeMillis() - startedAt) / 1000f
-            // 0–0.15s: base speed · 0.15–0.6s: ramp · after: max
-            val accel = ((heldFor - 0.15f) / 0.45f).coerceIn(0f, 1f)
-            val speed = 100f + 320f * accel // ~100 → ~420 px/s
+            // Delay → ramp → hold at max. At 1× the ramp is a no-op (base == max).
+            val t = ((heldFor - BrowserConfig.CURSOR_HOLD_DELAY_S) /
+                BrowserConfig.CURSOR_HOLD_RAMP_S).coerceIn(0f, 1f)
+            // Smoothstep for a less abrupt feel
+            val accel = t * t * (3f - 2f * t)
+            val speed = base + (maxSpeed - base) * accel
             val len = sqrt(dirX * dirX + dirY * dirY).coerceAtLeast(0.001f)
             applyMove((dirX / len) * speed * dt, (dirY / len) * speed * dt)
         }
@@ -816,8 +840,7 @@ fun BrowserScreen(
                 mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                 @Suppress("DEPRECATION")
                 layoutAlgorithm = WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
-                userAgentString =
-                    if (Prefs.isDesktopMode(ctx)) UserAgents.DESKTOP else UserAgents.MOBILE
+                userAgentString = Prefs.resolveUserAgent(ctx)
             }
             // Scale so desktop layout fits screen width
             setInitialScale(1)
@@ -1065,8 +1088,7 @@ fun BrowserScreen(
             ))
         }
         wv.onResume()
-        wv.settings.userAgentString =
-            if (Prefs.isDesktopMode(fl.context)) UserAgents.DESKTOP else UserAgents.MOBILE
+        wv.settings.userAgentString = Prefs.resolveUserAgent(fl.context)
         webView = wv
         if (existing != null) {
             // Already alive → no reload, just reflect its state
@@ -1147,7 +1169,7 @@ fun BrowserScreen(
                     if (!isTv) return@onPreviewKeyEvent false
                     val down = event.type == KeyEventType.KeyDown
                     val up = event.type == KeyEventType.KeyUp
-                    val step = 10f
+                    val step = BrowserConfig.CURSOR_STEP_PX
 
                     if (down && (event.key == Key.Menu || event.key == Key.Guide || event.key == Key.Info)) {
                         if (chromeVisible) hideChrome() else showChrome()
@@ -1469,11 +1491,11 @@ fun BrowserScreen(
                         Spacer(Modifier.width(8.dp))
                         PanelButton(
                             icon = Icons.Outlined.Computer,
-                            label = if (desktopMode) stringResource(R.string.panel_desktop) else stringResource(R.string.panel_mobile),
-                            active = desktopMode,
+                            label = uaPreset.label,
+                            active = uaPreset != UserAgentPreset.Default,
                             size = 44.dp,
                             showLabel = false,
-                            onClick = { toggleDesktop() }
+                            onClick = { uaMenuOpen = !uaMenuOpen }
                         )
                     }
                     // Group 2: Close · Back · Forward · Reload
@@ -1660,9 +1682,9 @@ fun BrowserScreen(
                         )
                         PanelButton(
                             Icons.Outlined.Computer,
-                            label = if (desktopMode) stringResource(R.string.panel_desktop) else stringResource(R.string.panel_mobile),
-                            active = desktopMode,
-                            onClick = { toggleDesktop() }
+                            label = uaPreset.label,
+                            active = uaPreset != UserAgentPreset.Default,
+                            onClick = { uaMenuOpen = !uaMenuOpen }
                         )
                         if (detectedStreams.isNotEmpty()) {
                             PanelButton(
@@ -1750,6 +1772,127 @@ fun BrowserScreen(
                 onClear = { clearAllTabs() },
                 onDismiss = { tabsExpanded = false }
             )
+        }
+
+        // ===== User-Agent preset selector (toolbar shortcut) =====
+        if (uaMenuOpen) {
+            Dialog(
+                onDismissRequest = { uaMenuOpen = false },
+                properties = DialogProperties(usePlatformDefaultWidth = false)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .widthIn(max = 380.dp)
+                        .heightIn(max = 520.dp)
+                        .background(DigiColors.BgCard, RoundedCornerShape(16.dp))
+                        .border(1.dp, DigiColors.Border, RoundedCornerShape(16.dp))
+                ) {
+                    Text(
+                        stringResource(R.string.ua_menu_title),
+                        color = DigiColors.TextPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp)
+                    )
+                    Column(
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        // Default
+                        val defaultSelected = uaPreset == UserAgentPreset.Default
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { applyUserAgent(UserAgentPreset.Default) }
+                                .background(
+                                    if (defaultSelected) DigiColors.Accent.copy(alpha = 0.15f)
+                                    else Color.Transparent
+                                )
+                                .padding(horizontal = 20.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                UserAgentPreset.Default.label,
+                                color = if (defaultSelected) DigiColors.Accent else DigiColors.TextPrimary,
+                                fontSize = 15.sp,
+                                fontWeight = if (defaultSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (defaultSelected) {
+                                Icon(
+                                    Icons.Outlined.Check, null,
+                                    tint = DigiColors.Accent,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                        // Brand groups
+                        UserAgentPreset.brandGroups.forEach { (brand, presets) ->
+                            Text(
+                                brand,
+                                color = DigiColors.TextMuted,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.padding(start = 20.dp, top = 10.dp, bottom = 4.dp)
+                            )
+                            presets.forEach { preset ->
+                                val selected = uaPreset == preset
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { applyUserAgent(preset) }
+                                        .background(
+                                            if (selected) DigiColors.Accent.copy(alpha = 0.15f)
+                                            else Color.Transparent
+                                        )
+                                        .padding(horizontal = 20.dp, vertical = 11.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        preset.label,
+                                        color = if (selected) DigiColors.Accent else DigiColors.TextPrimary,
+                                        fontSize = 14.sp,
+                                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (selected) {
+                                        Icon(
+                                            Icons.Outlined.Check, null,
+                                            tint = DigiColors.Accent,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    HorizontalDivider(color = DigiColors.Border)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                uaMenuOpen = false
+                                hideChrome()
+                                onOpenSettings(liveUrl())
+                            }
+                            .padding(horizontal = 20.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Outlined.Settings, null,
+                            tint = DigiColors.TextMuted,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Text(
+                            stringResource(R.string.ua_menu_settings),
+                            color = DigiColors.TextPrimary,
+                            fontSize = 15.sp,
+                            modifier = Modifier.padding(start = 12.dp)
+                        )
+                    }
+                }
+            }
         }
     } // Box
 
